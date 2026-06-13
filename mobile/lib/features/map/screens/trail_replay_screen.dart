@@ -11,6 +11,7 @@ import '../../../core/theme/app_text_styles.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/widgets/state_views.dart';
 import '../../../services/map/map_service.dart';
+import '../../employees/widgets/employee_avatar.dart';
 import '../models/trail.dart';
 import '../providers/map_provider.dart';
 import '../widgets/employee_marker.dart';

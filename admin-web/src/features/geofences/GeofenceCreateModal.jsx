@@ -230,7 +230,7 @@ export default function GeofenceCreateModal({ open, onClose, onCreated }) {
           </p>
 
           {/* Map */}
-          <div className="h-72 overflow-hidden rounded-card border border-border">
+          <div className="relative z-0 h-72 overflow-hidden rounded-card border border-border">
             <MapContainer
               center={[20.5937, 78.9629]}
               zoom={5}

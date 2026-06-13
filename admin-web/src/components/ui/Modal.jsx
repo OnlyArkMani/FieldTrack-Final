@@ -27,19 +27,19 @@ export default function Modal({
   const widths = { sm: 'max-w-sm', md: 'max-w-lg', lg: 'max-w-2xl' };
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-[1100] flex items-center justify-center p-4">
       <div
         className="absolute inset-0 bg-black/40 backdrop-blur-sm"
         onClick={locked ? undefined : onClose}
       />
       <div
         className={clsx(
-          'relative z-10 w-full rounded-card bg-card shadow-card border border-border/60',
+          'relative z-[1101] w-full rounded-card bg-card shadow-card border border-border/60',
           'max-h-[90vh] overflow-hidden flex flex-col',
           widths[size],
         )}
       >
-        <div className="flex items-center justify-between border-b border-border/60 px-5 py-4">
+        <div className="relative z-20 flex items-center justify-between border-b border-border/60 bg-card px-5 py-4">
           <h3 className="text-base font-semibold text-text-primary">{title}</h3>
           {!locked && (
             <button
@@ -51,9 +51,9 @@ export default function Modal({
             </button>
           )}
         </div>
-        <div className="overflow-y-auto px-5 py-4">{children}</div>
+        <div className="relative z-0 overflow-y-auto px-5 py-4">{children}</div>
         {footer && (
-          <div className="flex justify-end gap-2 border-t border-border/60 px-5 py-4">
+          <div className="relative z-20 flex justify-end gap-2 border-t border-border/60 bg-card px-5 py-4">
             {footer}
           </div>
         )}
