@@ -137,7 +137,7 @@ class TeamListScreen extends ConsumerWidget {
   }
 }
 
-class _TeamCard extends StatelessWidget {
+class _TeamCard extends ConsumerStatefulWidget {
   const _TeamCard({
     required this.team,
     required this.canDelete,
@@ -149,9 +149,18 @@ class _TeamCard extends StatelessWidget {
   final VoidCallback onDelete;
 
   @override
+  ConsumerState<_TeamCard> createState() => _TeamCardState();
+}
+
+class _TeamCardState extends ConsumerState<_TeamCard> {
+  bool _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
+    final team = widget.team;
     final colors = context.appColors;
     final scheme = Theme.of(context).colorScheme;
+    final hasMembers = team.memberCount > 0;
 
     return AppCard(
       child: Column(
@@ -195,11 +204,11 @@ class _TeamCard extends StatelessWidget {
               ),
               const SizedBox(width: AppDimens.grid * 1.5),
               _PerformanceRing(percent: team.performancePct),
-              if (canDelete)
+              if (widget.canDelete)
                 IconButton(
                   icon: Icon(Icons.delete_outline_rounded,
                       size: 20, color: colors.textSecondary),
-                  onPressed: onDelete,
+                  onPressed: widget.onDelete,
                   tooltip: 'Delete team',
                 ),
             ],
@@ -228,8 +237,132 @@ class _TeamCard extends StatelessWidget {
                 label: '${team.presentToday} present today',
                 color: scheme.secondary,
               ),
+              if (hasMembers) ...[
+                const Spacer(),
+                InkWell(
+                  borderRadius: BorderRadius.circular(AppDimens.buttonRadius),
+                  onTap: () => setState(() => _expanded = !_expanded),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: AppDimens.grid * 0.5, vertical: 2),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(_expanded ? 'Hide' : 'Members',
+                            style: AppTextStyles.caption
+                                .copyWith(color: scheme.primary, fontWeight: FontWeight.w600)),
+                        Icon(
+                          _expanded
+                              ? Icons.keyboard_arrow_up_rounded
+                              : Icons.keyboard_arrow_down_rounded,
+                          size: 18,
+                          color: scheme.primary,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
+          AnimatedCrossFade(
+            duration: const Duration(milliseconds: 250),
+            crossFadeState:
+                _expanded ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+            firstChild: const SizedBox(width: double.infinity),
+            secondChild: _MemberStatusList(teamId: team.id),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Live-status roster for a team — fetched lazily when the card is expanded.
+class _MemberStatusList extends ConsumerWidget {
+  const _MemberStatusList({required this.teamId});
+  final int teamId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final colors = context.appColors;
+    final async = ref.watch(teamDetailProvider(teamId));
+
+    return Padding(
+      padding: const EdgeInsets.only(top: AppDimens.grid),
+      child: async.when(
+        loading: () => Padding(
+          padding: const EdgeInsets.all(AppDimens.grid),
+          child: Row(
+            children: [
+              SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: colors.textSecondary)),
+              const SizedBox(width: AppDimens.grid),
+              Text('Loading members…',
+                  style:
+                      AppTextStyles.caption.copyWith(color: colors.textSecondary)),
+            ],
+          ),
+        ),
+        error: (e, _) => Text('Could not load members',
+            style: AppTextStyles.caption
+                .copyWith(color: Theme.of(context).colorScheme.error)),
+        data: (team) {
+          if (team.members.isEmpty) {
+            return Text('No members in this team yet',
+                style:
+                    AppTextStyles.caption.copyWith(color: colors.textSecondary));
+          }
+          return Column(
+            children: [
+              for (final m in team.members) _MemberRow(member: m),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _MemberRow extends StatelessWidget {
+  const _MemberRow({required this.member});
+  final TeamMember member;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.appColors;
+    final scheme = Theme.of(context).colorScheme;
+    final (Color dot, String label) = switch (member.liveStatus) {
+      'ACTIVE' => (colors.statusActive, 'Active'),
+      'IDLE' => (colors.statusIdle, 'Idle'),
+      _ => (colors.statusOffline, 'Offline'),
+    };
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: AppDimens.grid * 0.5),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 14,
+            backgroundColor: scheme.primary.withValues(alpha: 0.14),
+            child: Text(member.initials,
+                style: AppTextStyles.caption.copyWith(
+                    color: scheme.primary, fontWeight: FontWeight.w700)),
+          ),
+          const SizedBox(width: AppDimens.grid),
+          Expanded(
+            child: Text(member.name,
+                style: AppTextStyles.bodyMedium.copyWith(color: scheme.onSurface),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
+          ),
+          Container(width: 8, height: 8, decoration: BoxDecoration(color: dot, shape: BoxShape.circle)),
+          const SizedBox(width: 6),
+          Text(label,
+              style: AppTextStyles.caption.copyWith(color: dot, fontWeight: FontWeight.w500)),
         ],
       ),
     );

@@ -8,6 +8,7 @@ class TeamMember {
     required this.role,
     required this.isActive,
     this.profilePhotoUrl,
+    this.liveStatus = 'OFFLINE',
   });
 
   final int id;
@@ -16,6 +17,7 @@ class TeamMember {
   final UserRole role;
   final bool isActive;
   final String? profilePhotoUrl;
+  final String liveStatus; // ACTIVE | IDLE | OFFLINE (Redis-derived, read-time)
 
   String get initials {
     final parts = name.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty);
@@ -30,6 +32,7 @@ class TeamMember {
         role: UserRole.fromWire(json['role'] as String),
         isActive: (json['is_active'] as bool?) ?? true,
         profilePhotoUrl: json['profile_photo_url'] as String?,
+        liveStatus: (json['live_status'] as String?) ?? 'OFFLINE',
       );
 }
 

@@ -51,6 +51,9 @@ class TeamMemberOut(BaseModel):
     role: str
     profile_photo_url: str | None
     is_active: bool
+    # Redis-derived live status (ACTIVE | IDLE | OFFLINE); read-time, never
+    # persisted. Lets the Teams screen show who's live per team.
+    live_status: str = "OFFLINE"
 
 
 class TeamDetailOut(TeamOut):

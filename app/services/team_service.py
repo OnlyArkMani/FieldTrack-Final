@@ -9,11 +9,12 @@ SOFT DELETE:
   DELETE flips is_active=False and detaches members (team_id -> NULL) so they
   aren't stranded pointing at a dead team. The row survives for audit/history.
 """
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import bad_request, conflict, not_found
+from app.core.redis import Keys, get_redis
 from app.models.enums import UserRole
 from app.models.user import Team, User
 from app.repositories.team_repository import TeamRepository, TeamRow
@@ -32,9 +33,52 @@ class TeamService:
         self.db = db
         self.repo = TeamRepository(db)
 
+    # Live-status thresholds (mirror LocationService / employee_service).
+    _ACTIVE_WINDOW = timedelta(minutes=5)
+    _MOVING_MPS = 0.5
+
     @staticmethod
     def _performance(present: int, members: int) -> float:
         return round(present / members * 100, 1) if members else 0.0
+
+    async def _live_status_for(self, member_ids: list[int]) -> dict[int, str]:
+        """Batch one HGETALL per member's live-location hash and derive
+        ACTIVE/IDLE/OFFLINE — one Redis round trip for the whole team."""
+        if not member_ids:
+            return {}
+        redis = get_redis()
+        pipe = redis.pipeline()
+        for uid in member_ids:
+            pipe.hgetall(Keys.location(uid))
+        results = await pipe.execute()
+        now = datetime.now(timezone.utc)
+        return {
+            uid: self._derive_status(loc or {}, now)
+            for uid, loc in zip(member_ids, results)
+        }
+
+    @classmethod
+    def _derive_status(cls, loc: dict, now: datetime) -> str:
+        if not loc:
+            return "OFFLINE"
+        recorded: datetime | None = None
+        raw = loc.get("recorded_at")
+        if raw:
+            try:
+                recorded = datetime.fromisoformat(raw)
+                if recorded.tzinfo is None:
+                    recorded = recorded.replace(tzinfo=timezone.utc)
+            except ValueError:
+                recorded = None
+        if recorded is None:
+            return "IDLE"
+        if (now - recorded) <= cls._ACTIVE_WINDOW:
+            try:
+                speed = float(loc.get("speed") or 0.0)
+            except ValueError:
+                speed = 0.0
+            return "ACTIVE" if speed >= cls._MOVING_MPS else "IDLE"
+        return "IDLE"
 
     def _to_out(self, row: TeamRow) -> TeamOut:
         return TeamOut(
@@ -59,6 +103,7 @@ class TeamService:
         if row is None or not row.is_active:
             raise not_found("Team not found")
         members = await self.repo.get_members(team_id)
+        live = await self._live_status_for([m.id for m in members])
         base = self._to_out(row)
         return TeamDetailOut(
             **base.model_dump(),
@@ -70,6 +115,7 @@ class TeamService:
                     role=m.role.value,
                     profile_photo_url=m.profile_photo_url,
                     is_active=m.is_active,
+                    live_status=live.get(m.id, "OFFLINE"),
                 )
                 for m in members
             ],
