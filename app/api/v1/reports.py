@@ -18,8 +18,10 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.dependencies import CurrentUser, get_db
 from app.core.exceptions import forbidden, not_found
+from app.core.redis import Keys
 from app.models.enums import UserRole
 from app.models.user import User
 from app.schemas.report import (
@@ -60,6 +62,15 @@ async def generate_report(
         raise HTTPException(
             status_code=400,
             detail="End date cannot be in the future.",
+        )
+
+    # The distance + zone-time report is tabular-only (keeps generation fast and
+    # there's no useful single-page PDF layout for it).
+    if body.type is ReportType.DISTANCE_ZONES and body.format is ReportFormat.PDF:
+        raise HTTPException(
+            status_code=400,
+            detail="Distance report is available in CSV and Excel only",
+            headers={"X-Error-Code": "FORMAT_NOT_SUPPORTED"},
         )
 
     normalized = await ReportService(db).authorize(user, body.type, body.filters)
@@ -123,6 +134,48 @@ async def download_report(
         filename=filename,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.get("/{report_id}/debug")
+async def report_debug(
+    report_id: str,
+    user: CurrentUser,
+) -> dict:
+    """DEV-ONLY inspection of the raw job state. Returns exactly what's stored in
+    Redis plus on-disk file presence, so a stuck "PROCESSING" can be diagnosed
+    (did the background task ever write READY/FAILED? is the file actually
+    there?). Disabled (404) in production, and still owner/admin scoped."""
+    if get_settings().is_production:
+        raise not_found("Not found")
+
+    store = ReportStore()
+    raw = await store.get(report_id)
+    if not raw:
+        # Distinguish "never created / expired key" from a real state.
+        return {
+            "report_id": report_id,
+            "redis_key": Keys.report(report_id),
+            "exists": False,
+            "raw": None,
+        }
+
+    # Owner/admin scope even for the debug view.
+    owner_id = int(raw.get("owner_id", "0"))
+    if owner_id != user.id and user.role != UserRole.ADMIN:
+        raise forbidden("This report belongs to another user")
+
+    path = raw.get("path")
+    return {
+        "report_id": report_id,
+        "redis_key": Keys.report(report_id),
+        "exists": True,
+        "raw": raw,
+        "file_path": path,
+        "file_exists": bool(path) and os.path.isfile(path),
+        "file_size_bytes": (
+            os.path.getsize(path) if path and os.path.isfile(path) else None
+        ),
+    }
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────

@@ -34,6 +34,21 @@ class ReportRepository {
     return ReportStatusResult.fromJson(data);
   }
 
+  /// Raw bytes of the finished file. Platform-agnostic (just HTTP) — the caller
+  /// decides whether to write a File (mobile) or trigger a browser download
+  /// (web). The auth interceptor still attaches the bearer token.
+  Future<List<int>> downloadBytes(String reportId) async {
+    try {
+      final resp = await _api.dio.get<List<int>>(
+        '/reports/$reportId/download',
+        options: Options(responseType: ResponseType.bytes),
+      );
+      return resp.data ?? const <int>[];
+    } on DioException catch (e) {
+      throw ApiClient.mapError(e);
+    }
+  }
+
   /// Download the finished file to a temp path and return it (ready to share /
   /// open). Goes through the raw Dio so we can pull bytes; the auth interceptor
   /// still attaches the bearer token.

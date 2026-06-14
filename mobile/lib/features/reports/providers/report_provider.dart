@@ -1,9 +1,12 @@
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/network/api_exceptions.dart';
+import '../data/report_downloader.dart';
 import '../data/report_repository.dart';
 import '../models/report_models.dart';
 
@@ -24,6 +27,7 @@ class ReportUiState {
     this.error,
     this.file,
     this.timedOut = false,
+    this.savedToDevice = false,
   });
 
   final ReportType type;
@@ -33,8 +37,9 @@ class ReportUiState {
   final int? teamId; // supervisor team selection
   final ReportPhase phase;
   final String? error;
-  final File? file;
+  final File? file; // mobile only — null on web (browser-downloaded instead)
   final bool timedOut;
+  final bool savedToDevice; // web: file was pushed to the browser's downloads
 
   bool get isTeamReport => type == ReportType.team;
 
@@ -51,6 +56,7 @@ class ReportUiState {
     File? file,
     bool clearFile = false,
     bool? timedOut,
+    bool? savedToDevice,
   }) =>
       ReportUiState(
         type: type ?? this.type,
@@ -62,6 +68,7 @@ class ReportUiState {
         error: clearError ? null : (error ?? this.error),
         file: clearFile ? null : (file ?? this.file),
         timedOut: timedOut ?? this.timedOut,
+        savedToDevice: savedToDevice ?? this.savedToDevice,
       );
 }
 
@@ -83,8 +90,14 @@ class ReportNotifier extends Notifier<ReportUiState> {
   ReportRepository get _repo => ref.read(reportRepositoryProvider);
 
   // ── Configuration setters (reset any finished/failed result) ──────────
-  void setType(ReportType t) =>
-      state = state.copyWith(type: t, phase: ReportPhase.configuring, clearFile: true, clearError: true);
+  void setType(ReportType t) {
+    // Zone Report is CSV/Excel only — drop PDF if it was selected.
+    final fmt = (!t.supportsPdf && state.format == ReportFormat.pdf)
+        ? ReportFormat.excel
+        : state.format;
+    state = state.copyWith(
+        type: t, format: fmt, phase: ReportPhase.configuring, clearFile: true, clearError: true);
+  }
   void setFormat(ReportFormat f) =>
       state = state.copyWith(format: f, phase: ReportPhase.configuring, clearFile: true, clearError: true);
   void setRange(DateTimeRange r) =>
@@ -112,7 +125,11 @@ class ReportNotifier extends Notifier<ReportUiState> {
 
     final runId = ++_runId;
     state = state.copyWith(
-        phase: ReportPhase.generating, clearError: true, clearFile: true, timedOut: false);
+        phase: ReportPhase.generating,
+        clearError: true,
+        clearFile: true,
+        timedOut: false,
+        savedToDevice: false);
 
     try {
       final reportId = await _repo.generate(
@@ -129,8 +146,9 @@ class ReportNotifier extends Notifier<ReportUiState> {
         final ReportStatusResult st;
         try {
           st = await _repo.status(reportId);
-        } on ApiException catch (e) {
-          state = state.copyWith(phase: ReportPhase.failed, error: e.message);
+        } catch (e) {
+          state = state.copyWith(
+              phase: ReportPhase.failed, error: _msg(e, 'Could not check report status.'));
           return;
         }
 
@@ -153,22 +171,43 @@ class ReportNotifier extends Notifier<ReportUiState> {
           return;
         }
       }
-    } on ApiException catch (e) {
-      state = state.copyWith(phase: ReportPhase.failed, error: e.message);
+    } catch (e) {
+      // Catch EVERYTHING (not just ApiException): otherwise a platform error
+      // — e.g. path_provider/File being unavailable on web — would escape and
+      // leave the UI stuck on "Generating…" forever.
+      if (_runId != runId) return;
+      state = state.copyWith(
+          phase: ReportPhase.failed, error: _msg(e, 'Something went wrong generating the report.'));
     }
   }
 
   Future<void> _downloadAndFinish(String reportId, int runId) async {
     try {
+      if (kIsWeb) {
+        // Web has no filesystem/share sheet — stream the bytes straight to a
+        // browser download instead of writing a temp File.
+        final bytes = await _repo.downloadBytes(reportId);
+        if (_runId != runId) return;
+        triggerBrowserDownload(_asBytes(bytes), _filename(), state.format.mime);
+        state = state.copyWith(
+            phase: ReportPhase.ready, clearFile: true, savedToDevice: true);
+        return;
+      }
       final file = await _repo.download(reportId, filename: _filename());
       if (_runId != runId) return;
       state = state.copyWith(phase: ReportPhase.ready, file: file);
-    } on ApiException catch (e) {
+    } catch (e) {
       if (_runId != runId) return;
       state = state.copyWith(
-          phase: ReportPhase.failed, error: 'Downloaded failed: ${e.message}');
+          phase: ReportPhase.failed, error: _msg(e, 'Download failed. Please retry.'));
     }
   }
+
+  static Uint8List _asBytes(List<int> data) =>
+      data is Uint8List ? data : Uint8List.fromList(data);
+
+  static String _msg(Object e, String fallback) =>
+      e is ApiException ? e.message : fallback;
 
   Map<String, dynamic> _buildFilters() {
     if (state.isTeamReport) {

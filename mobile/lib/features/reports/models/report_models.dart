@@ -4,12 +4,16 @@ import 'package:flutter/material.dart';
 enum ReportType {
   attendance('ATTENDANCE', 'Attendance', Icons.fact_check_rounded),
   distance('DISTANCE', 'Distance', Icons.route_rounded),
+  distanceZones('DISTANCE_ZONES', 'Zone Report', Icons.pin_drop_rounded),
   team('TEAM', 'Team overview', Icons.groups_rounded);
 
   const ReportType(this.wire, this.label, this.icon);
   final String wire;
   final String label;
   final IconData icon;
+
+  /// Tabular-only report types: the backend rejects PDF for these.
+  bool get supportsPdf => this != ReportType.distanceZones;
 }
 
 /// Output file format. Mirrors the backend ReportFormat.
@@ -23,6 +27,13 @@ enum ReportFormat {
   final String label;
   final String ext;
   final IconData icon;
+
+  String get mime => switch (this) {
+        ReportFormat.pdf => 'application/pdf',
+        ReportFormat.excel =>
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ReportFormat.csv => 'text/csv',
+      };
 }
 
 /// Server-side job status. Mirrors the backend ReportStatus.

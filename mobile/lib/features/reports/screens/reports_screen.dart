@@ -63,6 +63,16 @@ class ReportsScreen extends ConsumerWidget {
                           ),
                     ],
                   ),
+                  if (state.type == ReportType.distanceZones) ...[
+                    const SizedBox(height: AppDimens.grid),
+                    Text(
+                      'Distance & time per geofence zone, daily',
+                      style: AppTextStyles.caption
+                          .copyWith(color: context.appColors.textSecondary),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -109,12 +119,14 @@ class ReportsScreen extends ConsumerWidget {
                     runSpacing: AppDimens.grid,
                     children: [
                       for (final f in ReportFormat.values)
-                        _SelectChip(
-                          label: f.label,
-                          icon: f.icon,
-                          selected: state.format == f,
-                          onTap: busy ? null : () => notifier.setFormat(f),
-                        ),
+                        // Zone Report is CSV/Excel only — hide the PDF chip.
+                        if (state.type.supportsPdf || f != ReportFormat.pdf)
+                          _SelectChip(
+                            label: f.label,
+                            icon: f.icon,
+                            selected: state.format == f,
+                            onTap: busy ? null : () => notifier.setFormat(f),
+                          ),
                     ],
                   ),
                 ],
@@ -402,7 +414,10 @@ class _ReadyCard extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final colors = context.appColors;
     final file = state.file;
-    final name = file?.path.split('/').last ?? 'report';
+    final savedToDevice = state.savedToDevice; // web: already in browser downloads
+    final name = savedToDevice
+        ? 'Saved to your downloads'
+        : (file?.path.split('/').last ?? 'report');
 
     return TweenAnimationBuilder<double>(
       tween: Tween(begin: 0, end: 1),
@@ -432,7 +447,7 @@ class _ReadyCard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Report ready',
+                      Text(savedToDevice ? 'Report downloaded' : 'Report ready',
                           style: AppTextStyles.bodyMedium
                               .copyWith(color: scheme.onSurface, fontWeight: FontWeight.w700)),
                       Text(name,
@@ -447,17 +462,19 @@ class _ReadyCard extends StatelessWidget {
             const SizedBox(height: AppDimens.grid * 2),
             Row(
               children: [
-                Expanded(
-                  child: AppButton(
-                    label: 'Share / Save',
-                    icon: Icons.ios_share_rounded,
-                    onPressed: file == null ? null : () => _share(context, file.path, name),
+                if (!savedToDevice) ...[
+                  Expanded(
+                    child: AppButton(
+                      label: 'Share / Save',
+                      icon: Icons.ios_share_rounded,
+                      onPressed: file == null ? null : () => _share(context, file.path, name),
+                    ),
                   ),
-                ),
-                const SizedBox(width: AppDimens.grid),
+                  const SizedBox(width: AppDimens.grid),
+                ],
                 Expanded(
                   child: AppButton(
-                    label: 'New',
+                    label: savedToDevice ? 'Generate another' : 'New',
                     variant: AppButtonVariant.secondary,
                     icon: Icons.refresh_rounded,
                     onPressed: onReset,
