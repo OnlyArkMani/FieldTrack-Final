@@ -3,14 +3,15 @@
 These are read-heavy range scans. They reuse the existing composite indexes:
 attendance (user_id, date) and location_logs (user_id, timestamp).
 """
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.attendance import Attendance
-from app.models.enums import AttendanceStatus, UserRole
+from app.models.enums import AttendanceStatus, GeofenceEventType, UserRole
+from app.models.geofence import Geofence, GeofenceEvent
 from app.models.location import LocationLog
 from app.models.user import Team, User
 
@@ -80,6 +81,75 @@ class ReportRepository:
             # normalize to date.
             dd = d if isinstance(d, date) else date.fromisoformat(str(d))
             out[(int(uid), dd)] = int(count)
+        return out
+
+    async def location_points_in_range(
+        self, *, start: date, end: date, user_ids: list[int]
+    ) -> dict[tuple[int, date], list[tuple[float, float, datetime]]]:
+        """Raw GPS pings bucketed by (user_id, calendar day), each bucket
+        ordered by timestamp ascending — ready for consecutive-point Haversine.
+        func.date() casts in the session tz (UTC) to line up with attendance.date,
+        same as mock_counts_in_range."""
+        if not user_ids:
+            return {}
+        day = func.date(LocationLog.timestamp)
+        stmt = (
+            select(
+                LocationLog.user_id,
+                day.label("day"),
+                LocationLog.lat,
+                LocationLog.lng,
+                LocationLog.timestamp,
+            )
+            .where(
+                LocationLog.user_id.in_(user_ids),
+                day >= start,
+                day <= end,
+            )
+            .order_by(LocationLog.user_id, LocationLog.timestamp.asc())
+        )
+        result = await self.db.execute(stmt)
+        out: dict[tuple[int, date], list[tuple[float, float, datetime]]] = {}
+        for uid, d, lat, lng, ts in result.all():
+            dd = d if isinstance(d, date) else date.fromisoformat(str(d))
+            out.setdefault((int(uid), dd), []).append((float(lat), float(lng), ts))
+        return out
+
+    async def geofence_events_in_range(
+        self, *, start: date, end: date, user_ids: list[int]
+    ) -> dict[tuple[int, date], list[tuple[int, str, str, datetime]]]:
+        """ENTER/EXIT events bucketed by (user_id, calendar day), ordered by
+        timestamp. Each entry is (geofence_id, zone_name, event_type, timestamp)
+        — geofence_id lets us pair an ENTER with the next EXIT for the SAME zone
+        even when an employee is inside two overlapping zones at once."""
+        if not user_ids:
+            return {}
+        day = func.date(GeofenceEvent.timestamp)
+        stmt = (
+            select(
+                GeofenceEvent.user_id,
+                day.label("day"),
+                GeofenceEvent.geofence_id,
+                Geofence.name,
+                GeofenceEvent.event_type,
+                GeofenceEvent.timestamp,
+            )
+            .join(Geofence, Geofence.id == GeofenceEvent.geofence_id)
+            .where(
+                GeofenceEvent.user_id.in_(user_ids),
+                day >= start,
+                day <= end,
+            )
+            .order_by(GeofenceEvent.user_id, GeofenceEvent.timestamp.asc())
+        )
+        result = await self.db.execute(stmt)
+        out: dict[tuple[int, date], list[tuple[int, str, str, datetime]]] = {}
+        for uid, d, gid, name, etype, ts in result.all():
+            dd = d if isinstance(d, date) else date.fromisoformat(str(d))
+            etype_val = etype.value if isinstance(etype, GeofenceEventType) else str(etype)
+            out.setdefault((int(uid), dd), []).append(
+                (int(gid), str(name), etype_val, ts)
+            )
         return out
 
     async def get_team(self, team_id: int) -> Team | None:

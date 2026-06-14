@@ -24,6 +24,7 @@ import uuid
 from calendar import monthrange
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from math import asin, cos, radians, sin, sqrt
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -227,6 +228,8 @@ class ReportService:
             return await self._attendance_data(n)
         if n.type is ReportType.DISTANCE:
             return await self._distance_data(n)
+        if n.type is ReportType.DISTANCE_ZONES:
+            return await self._distance_zones_data(n)
         return await self._team_data(n)
 
     async def _attendance_data(self, n: NormalizedReport) -> ReportData:
@@ -354,6 +357,106 @@ class ReportService:
             filename_stem=f"distance_{n.start}_{n.end}",
         )
 
+    async def _distance_zones_data(self, n: NormalizedReport) -> ReportData:
+        """Per employee, per day: distance travelled (Haversine over GPS pings)
+        + time spent inside each geofence (paired ENTER/EXIT events) + derived
+        travel time. One flat table, a TOTAL row after each employee."""
+        rows = await self.repo.attendance_in_range(
+            start=n.start, end=n.end, team_id=n.team_id,
+            user_id=n.user_id, status=None,
+        )
+        user_ids = list({u.id for _, u in rows})
+        points = await self.repo.location_points_in_range(
+            start=n.start, end=n.end, user_ids=user_ids
+        )
+        events = await self.repo.geofence_events_in_range(
+            start=n.start, end=n.end, user_ids=user_ids
+        )
+
+        columns = [
+            "Employee Name", "Date", "Distance (km)", "Active Time",
+            "Zones Visited", "Time in Zones", "Travel Time",
+        ]
+        table_rows: list[list[Any]] = []
+        grand_distance = 0.0
+        grand_zone_min = 0
+
+        # Accumulator for the current employee's TOTAL row.
+        cur_uid: int | None = None
+        cur_name: str | None = None
+        acc = {"distance": 0.0, "active": 0, "travel": 0, "days": 0}
+
+        def flush_total() -> None:
+            if cur_uid is not None and acc["days"]:
+                table_rows.append([
+                    f"TOTAL — {cur_name}",
+                    self._range_text(n.start, n.end),
+                    round(acc["distance"], 2),
+                    self._fmt_duration(acc["active"]),
+                    "—",
+                    "—",
+                    self._fmt_duration(acc["travel"]),
+                ])
+
+        for att, user in rows:  # ordered by name, then date
+            key = (user.id, att.date)
+            distance_km = round(
+                self._haversine_total_m(points.get(key, [])) / 1000, 2
+            )
+            end_dt = self._session_end_dt(att.sessions)
+            zones = self._zone_durations(events.get(key, []), end_dt)
+            zone_total_min = sum(mins for _, mins in zones)
+            zone_details = (
+                "; ".join(f"{name}: {self._fmt_zone_minutes(mins)}" for name, mins in zones)
+                or "—"
+            )
+            active_min = att.total_duration_minutes
+            travel_min = max(active_min - zone_total_min, 0)
+
+            if user.id != cur_uid:
+                flush_total()
+                cur_uid, cur_name = user.id, user.name
+                acc = {"distance": 0.0, "active": 0, "travel": 0, "days": 0}
+
+            table_rows.append([
+                user.name,
+                att.date.isoformat(),
+                distance_km,
+                self._fmt_duration(active_min),
+                len(zones),
+                zone_details,
+                self._fmt_duration(travel_min),
+            ])
+            acc["distance"] += distance_km
+            acc["active"] += active_min
+            acc["travel"] += travel_min
+            acc["days"] += 1
+            grand_distance += distance_km
+            grand_zone_min += zone_total_min
+
+        flush_total()  # last employee
+
+        summary = [
+            ("Employees", str(len(user_ids))),
+            ("Employee-days", str(len(rows))),
+            ("Total distance", f"{grand_distance:.2f} km"),
+            ("Total time in zones", self._fmt_duration(grand_zone_min)),
+        ]
+        return ReportData(
+            title="Distance & Zone Time Report",
+            subtitle=self._range_text(n.start, n.end),
+            filters_text=self._filters_text(n),
+            generated_at=datetime.now(timezone.utc),
+            summary=summary,
+            tables=[ReportTable(
+                name="Distance & Zones",
+                columns=columns,
+                rows=table_rows,
+                numeric_cols={2, 4},
+            )],
+            filename_stem=f"distance_zones_{n.start}_{n.end}",
+        )
+
     async def _team_data(self, n: NormalizedReport) -> ReportData:
         assert n.team_id is not None
         team = await self.repo.get_team(n.team_id)
@@ -460,6 +563,82 @@ class ReportService:
     def _fmt_duration(minutes: int) -> str:
         h, m = divmod(max(minutes, 0), 60)
         return f"{h}h {m:02d}m"
+
+    @staticmethod
+    def _fmt_zone_minutes(minutes: int) -> str:
+        """Human zone duration: '2h 15min' or '45min'."""
+        h, m = divmod(max(minutes, 0), 60)
+        return f"{h}h {m}min" if h else f"{m}min"
+
+    @staticmethod
+    def _haversine_total_m(
+        points: list[tuple[float, float, datetime]]
+    ) -> float:
+        """Sum of great-circle distance (metres) between consecutive pings."""
+        if len(points) < 2:
+            return 0.0
+        radius = 6_371_000.0
+        total = 0.0
+        for (lat1, lng1, _), (lat2, lng2, _) in zip(points, points[1:]):
+            p1, p2 = radians(lat1), radians(lat2)
+            dphi = radians(lat2 - lat1)
+            dlmb = radians(lng2 - lng1)
+            a = sin(dphi / 2) ** 2 + cos(p1) * cos(p2) * sin(dlmb / 2) ** 2
+            total += 2 * radius * asin(min(1.0, sqrt(a)))
+        return total
+
+    @staticmethod
+    def _aware(dt: datetime) -> datetime:
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+    @classmethod
+    def _session_end_dt(cls, sessions: list[AttendanceSession]) -> datetime | None:
+        """Latest END session timestamp (tz-aware), used as the EXIT time for a
+        zone the employee entered but never left before the day closed."""
+        end: datetime | None = None
+        for s in sessions:
+            if s.type == SessionType.END:
+                ts = cls._aware(s.timestamp)
+                if end is None or ts > end:
+                    end = ts
+        return end
+
+    @classmethod
+    def _zone_durations(
+        cls,
+        events: list[tuple[int, str, str, datetime]],
+        end_dt: datetime | None,
+    ) -> list[tuple[str, int]]:
+        """Pair ENTER/EXIT per geofence_id and total the minutes inside each
+        zone. Events arrive ordered by timestamp. An ENTER with no matching EXIT
+        (still inside at day's end) is closed with `end_dt` (attendance END);
+        if there's no END either, it contributes nothing. Returns
+        [(zone_name, minutes)] for every zone the employee actually entered,
+        in first-entry order."""
+        names: dict[int, str] = {}
+        order: list[int] = []
+        open_enter: dict[int, datetime] = {}
+        minutes: dict[int, float] = {}
+
+        for gid, name, etype, ts in events:
+            ts = cls._aware(ts)
+            if gid not in names:
+                names[gid] = name
+                order.append(gid)
+                minutes.setdefault(gid, 0.0)
+            if etype == "ENTER":
+                open_enter[gid] = ts
+            elif etype == "EXIT":
+                ent = open_enter.pop(gid, None)
+                if ent is not None and ts > ent:
+                    minutes[gid] += (ts - ent).total_seconds() / 60.0
+
+        # Unclosed enters → close with attendance END time.
+        for gid, ent in open_enter.items():
+            if end_dt is not None and end_dt > ent:
+                minutes[gid] += (end_dt - ent).total_seconds() / 60.0
+
+        return [(names[gid], int(round(minutes[gid]))) for gid in order]
 
     @staticmethod
     def _parse_status(raw: str | None) -> AttendanceStatus | None:

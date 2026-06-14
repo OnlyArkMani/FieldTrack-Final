@@ -1,205 +1,261 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import dayjs from 'dayjs';
-import { Download, FileSpreadsheet } from 'lucide-react';
+import { Download, FileSpreadsheet, AlertCircle, Loader2 } from 'lucide-react';
 
 import { api, apiErrorMessage } from '@/services/api/client';
 import PageHeader from '@/components/ui/PageHeader';
 import Card, { CardHeader } from '@/components/ui/Card';
 import Button from '@/components/ui/Button';
 import { Input, Select } from '@/components/ui/Input';
-import Table from '@/components/ui/Table';
-import Badge from '@/components/ui/Badge';
 
 const MAX_RANGE_DAYS = 31;
+const POLL_INTERVAL_MS = 3000;
+const POLL_MAX_TICKS = 20; // 20 × 3s = 60s timeout
 
-// Cell values starting with these characters are interpreted as formulas by
-// Excel/Sheets/LibreOffice when a CSV is opened (CSV/formula injection).
-// work_summary is free-text from employees, so neutralize it with a leading
-// apostrophe — Excel then renders it literally as text.
-const FORMULA_PREFIXES = ['=', '+', '-', '@', '\t', '\r'];
+const REPORT_TYPES = [
+  { value: 'ATTENDANCE', label: 'Attendance' },
+  { value: 'DISTANCE', label: 'Distance' },
+  { value: 'DISTANCE_ZONES', label: 'Distance & Zone Time' },
+];
 
-function toCsv(rows, columns) {
-  const esc = (v) => {
-    let s = v == null ? '' : String(v);
-    if (FORMULA_PREFIXES.some((p) => s.startsWith(p))) s = `'${s}`;
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  const header = columns.map((c) => esc(c.header)).join(',');
-  const body = rows.map((r) => columns.map((c) => esc(c.value(r))).join(',')).join('\n');
-  return `${header}\n${body}`;
-}
+const ALL_FORMATS = [
+  { value: 'EXCEL', label: 'Excel' },
+  { value: 'CSV', label: 'CSV' },
+  { value: 'PDF', label: 'PDF' },
+];
 
-function download(filename, content, type = 'text/csv;charset=utf-8') {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-const fmtTime = (sessions, type) => {
-  const list = (sessions || []).filter((s) => s.type === type);
-  if (!list.length) return '';
-  const ts = type === 'END' ? list[list.length - 1].timestamp : list[0].timestamp;
-  return dayjs(ts).format('HH:mm');
-};
+// Report types that don't support PDF (tabular-only, server-enforced too).
+const NO_PDF_TYPES = new Set(['DISTANCE_ZONES']);
 
 export default function ReportsPage() {
   const today = dayjs().format('YYYY-MM-DD');
-  const [type, setType] = useState('attendance');
-  const [startDate, setStartDate] = useState(today);
+  const [type, setType] = useState('ATTENDANCE');
+  const [format, setFormat] = useState('EXCEL');
+  const [startDate, setStartDate] = useState(dayjs().subtract(29, 'day').format('YYYY-MM-DD'));
   const [endDate, setEndDate] = useState(today);
-  const [rows, setRows] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
 
-  // Max end date = start + 31 days, but never in the future.
+  // phase: idle | generating | ready | failed
+  const [phase, setPhase] = useState('idle');
+  const [error, setError] = useState(null);
+  const [reportId, setReportId] = useState(null);
+  const [downloading, setDownloading] = useState(false);
+
+  const pollRef = useRef(null);
+  const clearPoll = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+  // Stop polling if the user navigates away mid-generation.
+  useEffect(() => clearPoll, []);
+
+  const noPdf = NO_PDF_TYPES.has(type);
+  const formats = noPdf ? ALL_FORMATS.filter((f) => f.value !== 'PDF') : ALL_FORMATS;
+
+  // Max end date = start + 31 days, never in the future.
   const capDate = (start) => {
-    const plus31 = dayjs(start).add(MAX_RANGE_DAYS, 'day');
-    return plus31.isAfter(dayjs(today)) ? dayjs(today) : plus31;
+    const plus = dayjs(start).add(MAX_RANGE_DAYS, 'day');
+    return plus.isAfter(dayjs(today)) ? dayjs(today) : plus;
   };
   const maxEnd = capDate(startDate).format('YYYY-MM-DD');
+  const rangeTooLong = dayjs(endDate).diff(dayjs(startDate), 'day') > MAX_RANGE_DAYS;
+
+  const resetResult = () => {
+    clearPoll();
+    setPhase('idle');
+    setError(null);
+    setReportId(null);
+  };
+
+  const onTypeChange = (value) => {
+    setType(value);
+    // Distance & Zone Time has no PDF — fall back to Excel if PDF was picked.
+    if (NO_PDF_TYPES.has(value) && format === 'PDF') setFormat('EXCEL');
+    resetResult();
+  };
 
   const onStartChange = (value) => {
     setStartDate(value);
-    // Clamp the end date into [start, start+31] (and not in the future).
     const start = dayjs(value);
     const cap = capDate(value);
     if (dayjs(endDate).isAfter(cap) || dayjs(endDate).isBefore(start)) {
       setEndDate(cap.format('YYYY-MM-DD'));
     }
+    resetResult();
   };
 
-  const rangeTooLong = dayjs(endDate).diff(dayjs(startDate), 'day') > MAX_RANGE_DAYS;
-
-  const ATTENDANCE_COLS = [
-    { header: 'Employee', value: (r) => r.employee?.name || r.user_id },
-    { header: 'Date', value: (r) => r.date },
-    { header: 'Start', value: (r) => fmtTime(r.sessions, 'START') },
-    { header: 'End', value: (r) => fmtTime(r.sessions, 'END') },
-    { header: 'Duration (min)', value: (r) => r.total_duration_minutes ?? 0 },
-    { header: 'Distance (m)', value: (r) => Math.round(r.total_distance_meters ?? 0) },
-    { header: 'Status', value: (r) => r.status },
-    { header: 'Work summary', value: (r) => r.work_summary || '' },
-  ];
-  const EMPLOYEE_COLS = [
-    { header: 'Name', value: (r) => r.name },
-    { header: 'Email', value: (r) => r.email },
-    { header: 'Phone', value: (r) => r.phone || '' },
-    { header: 'Role', value: (r) => r.role },
-    { header: 'Active', value: (r) => (r.is_active ? 'Yes' : 'No') },
-  ];
-  const cols = type === 'attendance' ? ATTENDANCE_COLS : EMPLOYEE_COLS;
+  const pollStatus = (id) => {
+    let ticks = 0;
+    pollRef.current = setInterval(async () => {
+      ticks += 1;
+      try {
+        const { data } = await api.get(`/reports/${id}/status`);
+        if (data.status === 'READY') {
+          clearPoll();
+          setPhase('ready');
+        } else if (data.status === 'FAILED' || data.status === 'EXPIRED') {
+          clearPoll();
+          setPhase('failed');
+          setError(data.error || 'Report generation failed. Please retry.');
+        } else if (ticks >= POLL_MAX_TICKS) {
+          clearPoll();
+          setPhase('failed');
+          setError('Still generating after 60s. Please retry.');
+        }
+        // PROCESSING → keep polling
+      } catch (err) {
+        clearPoll();
+        setPhase('failed');
+        setError(apiErrorMessage(err));
+      }
+    }, POLL_INTERVAL_MS);
+  };
 
   const generate = async () => {
     if (rangeTooLong) return;
-    setLoading(true);
-    setError(null);
+    resetResult();
+    setPhase('generating');
     try {
-      if (type === 'attendance') {
-        const days = [];
-        let d = dayjs(startDate);
-        const end = dayjs(endDate);
-        while (!d.isAfter(end) && days.length <= MAX_RANGE_DAYS) {
-          days.push(d.format('YYYY-MM-DD'));
-          d = d.add(1, 'day');
-        }
-        const all = [];
-        for (const day of days) {
-          // eslint-disable-next-line no-await-in-loop
-          const { data } = await api.get('/attendance/all', { params: { date: day, limit: 100 } });
-          all.push(...(data.items || []));
-        }
-        setRows(all);
-      } else {
-        const { data } = await api.get('/employees', { params: { limit: 100 } });
-        setRows(data.items || []);
-      }
+      const { data } = await api.post('/reports/generate', {
+        type,
+        format,
+        filters: { start_date: startDate, end_date: endDate },
+      });
+      setReportId(data.report_id);
+      pollStatus(data.report_id);
     } catch (err) {
+      setPhase('failed');
       setError(apiErrorMessage(err));
-      setRows([]);
-    } finally {
-      setLoading(false);
     }
   };
 
-  const exportCsv = () => {
-    const name =
-      type === 'attendance'
-        ? `attendance_${startDate}_to_${endDate}.csv`
-        : `employees_${today}.csv`;
-    download(name, toCsv(rows, cols));
+  const downloadFile = async () => {
+    if (!reportId) return;
+    setDownloading(true);
+    try {
+      const resp = await api.get(`/reports/${reportId}/download`, { responseType: 'blob' });
+      const cd = resp.headers['content-disposition'] || '';
+      const match = /filename="?([^"]+)"?/.exec(cd);
+      const ext = format === 'EXCEL' ? 'xlsx' : format.toLowerCase();
+      const filename = match ? match[1] : `report_${startDate}_${endDate}.${ext}`;
+      const url = URL.createObjectURL(resp.data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(apiErrorMessage(err));
+    } finally {
+      setDownloading(false);
+    }
   };
 
-  const previewColumns = cols.slice(0, 5).map((c, i) => ({
-    key: String(i),
-    header: c.header,
-    render: (r) => (c.header === 'Status' ? <Badge status={c.value(r)} /> : String(c.value(r) ?? '')),
-  }));
+  const busy = phase === 'generating';
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Reports" subtitle="Generate and download CSV exports" />
+      <PageHeader title="Reports" subtitle="Generate and download attendance, distance & zone reports" />
 
       <Card>
         <CardHeader title="Build a report" />
         <div className="flex flex-wrap items-end gap-3">
-          <div className="w-52">
-            <Select label="Report type" value={type} onChange={(e) => setType(e.target.value)}>
-              <option value="attendance">Attendance</option>
-              <option value="employees">Employee roster</option>
+          <div className="w-56">
+            <Select label="Report type" value={type} onChange={(e) => onTypeChange(e.target.value)} disabled={busy}>
+              {REPORT_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
             </Select>
           </div>
-          {type === 'attendance' && (
-            <>
-              <div className="w-44">
-                <Input
-                  label="Start date"
-                  type="date"
-                  max={today}
-                  value={startDate}
-                  onChange={(e) => onStartChange(e.target.value)}
-                />
-              </div>
-              <div className="w-44">
-                <Input
-                  label="End date"
-                  type="date"
-                  min={startDate}
-                  max={maxEnd}
-                  value={endDate}
-                  onChange={(e) => setEndDate(e.target.value)}
-                />
-              </div>
-            </>
-          )}
-          <Button icon={FileSpreadsheet} onClick={generate} loading={loading} disabled={rangeTooLong}>
+          <div className="w-44">
+            <Input
+              label="Start date"
+              type="date"
+              max={today}
+              value={startDate}
+              onChange={(e) => onStartChange(e.target.value)}
+              disabled={busy}
+            />
+          </div>
+          <div className="w-44">
+            <Input
+              label="End date"
+              type="date"
+              min={startDate}
+              max={maxEnd}
+              value={endDate}
+              onChange={(e) => { setEndDate(e.target.value); resetResult(); }}
+              disabled={busy}
+            />
+          </div>
+          <div className="w-40">
+            <Select label="Format" value={format} onChange={(e) => { setFormat(e.target.value); resetResult(); }} disabled={busy}>
+              {formats.map((f) => (
+                <option key={f.value} value={f.value}>{f.label}</option>
+              ))}
+            </Select>
+          </div>
+          <Button icon={FileSpreadsheet} onClick={generate} loading={busy} disabled={rangeTooLong || busy}>
             Generate
           </Button>
-          <Button variant="outline" icon={Download} onClick={exportCsv} disabled={!rows.length}>
-            Download CSV
+          <Button
+            variant="outline"
+            icon={Download}
+            onClick={downloadFile}
+            loading={downloading}
+            disabled={phase !== 'ready'}
+          >
+            Download
           </Button>
         </div>
 
-        {type === 'attendance' && (
-          <p className="mt-2 text-xs italic text-text-secondary">Max 31 days per report</p>
-        )}
-        {rangeTooLong && (
-          <p className="mt-2 text-sm text-danger">
-            Please select a date range of 31 days or less.
+        <p className="mt-2 text-xs italic text-text-secondary">Max 31 days per report.</p>
+        {noPdf && (
+          <p className="mt-1 text-xs text-text-secondary">
+            Shows distance traveled and time spent in each geofence zone per employee per day.
+            Available in Excel and CSV only.
           </p>
         )}
-        {error && <p className="mt-3 text-sm text-danger">{error}</p>}
+        {rangeTooLong && (
+          <p className="mt-2 text-sm text-danger">Please select a date range of 31 days or less.</p>
+        )}
       </Card>
 
-      {rows.length > 0 && (
-        <Card padded={false}>
-          <div className="p-5 pb-3">
-            <CardHeader title={`Preview — ${rows.length} rows`} subtitle="First 5 columns shown" />
+      {phase === 'generating' && (
+        <Card>
+          <div className="flex items-center gap-3 text-text-secondary">
+            <Loader2 className="h-5 w-5 animate-spin text-primary" />
+            <span>Generating your report… this can take a few seconds.</span>
           </div>
-          <Table columns={previewColumns} rows={rows} rowKey={(r) => r.id ?? `${r.user_id}-${r.email}`} />
+        </Card>
+      )}
+
+      {phase === 'ready' && (
+        <Card>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <FileSpreadsheet className="h-5 w-5 text-status-active" />
+              <span className="font-medium text-text-primary">Report ready to download.</span>
+            </div>
+            <Button icon={Download} onClick={downloadFile} loading={downloading}>
+              Download
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {phase === 'failed' && error && (
+        <Card>
+          <div className="flex items-start gap-3 text-danger">
+            <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
+            <div>
+              <p className="font-medium">{error}</p>
+              <Button variant="outline" size="sm" className="mt-3" onClick={generate}>
+                Retry
+              </Button>
+            </div>
+          </div>
         </Card>
       )}
     </div>

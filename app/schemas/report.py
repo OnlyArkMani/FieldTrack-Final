@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field, model_validator
 class ReportType(str, Enum):
     ATTENDANCE = "ATTENDANCE"
     DISTANCE = "DISTANCE"
+    DISTANCE_ZONES = "DISTANCE_ZONES"  # distance + time-in-geofence, CSV/Excel only
     TEAM = "TEAM"
 
 
