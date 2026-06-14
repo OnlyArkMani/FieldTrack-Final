@@ -14,8 +14,16 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      // WebSocket upgrade — MUST be declared before the generic '/api' entry
+      // (Vite matches in order; the more specific path has to win). ws:true is
+      // what actually enables the HTTP→WS upgrade through the proxy.
+      '/api/v1/ws': {
+        target: process.env.VITE_PROXY_TARGET || 'http://localhost:8090',
+        changeOrigin: true,
+        ws: true,
+      },
       '/api': {
-        target: process.env.VITE_PROXY_TARGET || 'http://localhost:8000',
+        target: process.env.VITE_PROXY_TARGET || 'http://localhost:8090',
         changeOrigin: true,
         ws: true, // proxy the /ws/admin-live WebSocket too
       },
