@@ -1,0 +1,236 @@
+# FieldTrack CI/CD pipeline.
+#
+# Triggers:
+#   - Any push or PR to `main` runs the `test` job (fast feedback on PRs).
+#   - Only a push to `main` (i.e. a merged PR) goes on to `build` and `deploy`.
+#
+# Pipeline:
+#   test   -> build -> deploy
+#   (PRs stop after `test`; only main branch pushes reach build/deploy)
+#
+# Required GitHub Secrets (Settings -> Secrets and variables -> Actions):
+#   VPS_HOST        - the VPS's public IP or domain (e.g. 203.0.113.10)
+#   VPS_USER        - SSH user created by scripts/server_setup.sh (e.g. deploy)
+#   VPS_SSH_KEY     - private half of an SSH keypair whose public half is in
+#                     /home/deploy/.ssh/authorized_keys on the VPS.
+#                     Generate locally with:
+#                       ssh-keygen -t ed25519 -C "github-actions" -f deploy_key
+#                     then `cat deploy_key.pub` -> append to authorized_keys
+#                     on the VPS, and paste the CONTENTS of `deploy_key`
+#                     (the private key) into this secret.
+#   GHCR_TOKEN      - a GitHub Personal Access Token (classic) with
+#                     `write:packages` + `read:packages` scope, used to push
+#                     and pull images from ghcr.io. Create at
+#                     https://github.com/settings/tokens
+#   NOTIFY_WEBHOOK_URL - a Discord or Slack "Incoming Webhook" URL, used to
+#                     post deploy success/failure messages. Optional but
+#                     recommended — create one from your Discord channel's
+#                     Integrations settings, or Slack's "Incoming Webhooks"
+#                     app.
+#   CODECOV_TOKEN   - (optional) token from https://app.codecov.io for this
+#                     repo, used to upload coverage reports. The coverage
+#                     upload step is skipped automatically if this isn't set.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel older in-flight runs for the same branch when new commits land.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────
+  # 1. TEST — runs on every push and PR. Spins up real Postgres+Redis service
+  #    containers so the tests hit the same engines as production (PostGIS
+  #    matters for geofencing tests).
+  # ──────────────────────────────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:15-3.4
+        env:
+          POSTGRES_USER: fieldtrack
+          POSTGRES_PASSWORD: fieldtrack_test
+          POSTGRES_DB: fieldtrack_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fieldtrack"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      APP_ENV: test
+      DEBUG: "true"
+      DATABASE_URL: postgresql+asyncpg://fieldtrack:fieldtrack_test@localhost:5432/fieldtrack_test
+      REDIS_URL: redis://localhost:6379/0
+      JWT_ACCESS_SECRET: test_access_secret
+      JWT_REFRESH_SECRET: test_refresh_secret
+      FCM_PROJECT_ID: test-project
+      FCM_SERVICE_ACCOUNT_FILE: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run database migrations
+        run: alembic upgrade head
+
+      - name: Run tests with coverage
+        run: pytest --cov=app --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        # fail_ci_if_error: false — if CODECOV_TOKEN isn't set yet, this step
+        # just logs a warning instead of failing the whole pipeline.
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  # ──────────────────────────────────────────────────────────────────────
+  # 2. BUILD — only on push to main, only after tests pass. Builds the
+  #    Docker image once and pushes it to GHCR tagged both `latest` and the
+  #    commit SHA. The SHA tag is what `deploy` actually runs, so a rollback
+  #    just means re-pulling a previous SHA — `latest` is for convenience.
+  # ──────────────────────────────────────────────────────────────────────
+  build:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ──────────────────────────────────────────────────────────────────────
+  # 3. DEPLOY — only on push to main, only after build succeeds. Uses the
+  #    `production` GitHub Environment, which you can configure (Settings ->
+  #    Environments -> production -> Required reviewers) to require manual
+  #    approval before this job runs — a human clicks "Approve" in the
+  #    Actions tab before anything touches the VPS.
+  # ──────────────────────────────────────────────────────────────────────
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd /opt/fieldtrack/app
+
+            echo "==> Pulling latest source"
+            git fetch origin main
+            git reset --hard origin/main
+
+            echo "==> Logging in to GHCR"
+            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+            echo "==> Pulling image ${{ github.sha }}"
+            export IMAGE_TAG="${{ github.sha }}"
+            docker pull ghcr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            # Tag it as the local name docker-compose.prod.yml builds/refers to,
+            # so `docker compose up` uses this pre-built image instead of
+            # rebuilding from source.
+            docker tag ghcr.io/${{ env.IMAGE_NAME }}:${{ github.sha }} fieldtrack-app:${{ github.sha }}
+
+            echo "==> Running database migrations"
+            docker compose -f docker-compose.prod.yml run --rm \
+              -e IMAGE_TAG=${{ github.sha }} app alembic upgrade head
+
+            echo "==> Rolling restart of the app service only"
+            # Postgres, Redis, and Nginx are untouched — zero-downtime for
+            # everything except the brief app restart (Nginx queues requests).
+            IMAGE_TAG=${{ github.sha }} docker compose -f docker-compose.prod.yml up -d --no-deps app
+
+            echo "==> Waiting for app to become healthy"
+            sleep 15
+
+            echo "==> Health check"
+            if curl -fsS http://localhost:8000/api/v1/health > /dev/null; then
+              echo "Health check passed."
+            else
+              echo "Health check FAILED — rolling back to previous image"
+              PREV_TAG=$(docker images "fieldtrack-app" --format '{{.Tag}}' | grep -v "${{ github.sha }}" | grep -v latest | head -n1)
+              if [ -n "$PREV_TAG" ]; then
+                IMAGE_TAG=$PREV_TAG docker compose -f docker-compose.prod.yml up -d --no-deps --force-recreate app
+              fi
+              exit 1
+            fi
+
+            echo "==> Pruning old images (keep current + previous)"
+            docker image prune -f --filter "until=24h"
+
+      - name: Notify success
+        if: success()
+        run: |
+          curl -fsS -X POST -H "Content-Type: application/json" \
+            -d "{\"content\": \"✅ FieldTrack deploy succeeded — ${{ github.sha }} by ${{ github.actor }}\"}" \
+            "${{ secrets.NOTIFY_WEBHOOK_URL }}" || true
+
+      - name: Notify failure
+        if: failure()
+        run: |
+          curl -fsS -X POST -H "Content-Type: application/json" \
+            -d "{\"content\": \"❌ FieldTrack deploy FAILED — ${{ github.sha }} by ${{ github.actor }}. Check the Actions log.\"}" \
+            "${{ secrets.NOTIFY_WEBHOOK_URL }}" || true
