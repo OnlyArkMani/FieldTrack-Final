@@ -1,0 +1,31 @@
+# FieldTrack — Prometheus scrape configuration.
+# Mounted read-only into the prometheus container by
+# monitoring/docker-compose.monitoring.yml.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # FastAPI app metrics, exposed by prometheus-fastapi-instrumentator at
+  # GET /metrics (added in app/main.py — see the 3-line snippet below).
+  - job_name: fieldtrack-app
+    static_configs:
+      - targets: ["app:8000"]
+    metrics_path: /metrics
+
+  # VPS-level metrics (CPU, memory, disk, network) from node-exporter.
+  - job_name: node-exporter
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+# ─────────────────────────────────────────────────────────────────────────
+# FastAPI instrumentation (already applied in app/main.py for this project):
+#
+#   from prometheus_fastapi_instrumentator import Instrumentator
+#   ...
+#   Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+#
+# This adds request count, latency histograms, and in-progress request gauges
+# for every route, labeled by method/path/status code.
+# ─────────────────────────────────────────────────────────────────────────

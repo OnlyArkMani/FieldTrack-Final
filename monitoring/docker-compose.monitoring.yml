@@ -1,0 +1,98 @@
+# FieldTrack — monitoring stack (Uptime Kuma, Prometheus, Grafana, node-exporter)
+#
+# Run alongside the main stack:
+#   docker compose -f docker-compose.prod.yml -f monitoring/docker-compose.monitoring.yml up -d
+#
+# Everything here joins the same `fieldtrack_network` so Prometheus can reach
+# the `app` container's /metrics endpoint. Nothing in this file publishes a
+# port directly — Nginx proxies /status, /grafana, and Prometheus stays
+# internal-only (use SSH port-forwarding if you need to poke it directly:
+#   ssh -L 9090:localhost:9090 deploy@your-vps  ).
+
+name: fieldtrack-monitoring
+
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: fieldtrack-uptime-kuma
+    restart: always
+    volumes:
+      - uptime_kuma_data:/app/data
+    # Internal port 3001 — Nginx proxies /status to this.
+    expose:
+      - "3001"
+    mem_limit: 256m
+    networks:
+      - fieldtrack_network
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: fieldtrack-prometheus
+    restart: always
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    # Port 9090 internal only — no external access, not even via Nginx.
+    expose:
+      - "9090"
+    mem_limit: 512m
+    networks:
+      - fieldtrack_network
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: fieldtrack-grafana
+    restart: always
+    environment:
+      # Tells Grafana its own externally-visible URL, so links it generates
+      # (e.g. in alert emails) point to the right place behind Nginx's
+      # /grafana sub-path.
+      GF_SERVER_ROOT_URL: https://your-domain.com/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      # CHANGE THIS — set a real password via .env.prod, don't leave default.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change_me}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    # Internal port 3000 — Nginx proxies /grafana to this.
+    expose:
+      - "3000"
+    mem_limit: 256m
+    networks:
+      - fieldtrack_network
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.1
+    container_name: fieldtrack-node-exporter
+    restart: always
+    pid: host
+    # Mount the host's /proc, /sys, and / read-only so node-exporter reports
+    # real VPS-level CPU/memory/disk metrics, not just this container's own.
+    # Stays on fieldtrack_network (no host networking needed) so Prometheus
+    # can scrape it by service name, same as every other target.
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+    expose:
+      - "9100"
+    mem_limit: 128m
+    networks:
+      - fieldtrack_network
+
+volumes:
+  uptime_kuma_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  fieldtrack_network:
+    external: true
+    name: fieldtrack_fieldtrack_network

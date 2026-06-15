@@ -1,0 +1,192 @@
+# FieldTrack — PRODUCTION Docker Compose
+#
+# Run with:  docker compose -f docker-compose.prod.yml up -d
+# Requires:  .env.prod  (copy from .env.prod.example, fill in real secrets)
+#
+# DECISIONS (explicit):
+# - Postgres and Redis publish NO ports at all — not even to 127.0.0.1. The
+#   only way in or out of this stack from the internet is through Nginx on
+#   80/443. Everything else talks over the internal `fieldtrack_network`.
+# - postgis/postgis:15-3.4 — same major version as the dev compose, so a
+#   pg_dump taken in dev/staging restores cleanly into prod (and vice versa
+#   for the backup/restore scripts in scripts/backup.sh).
+# - pg_hba.conf is mounted in explicitly. The stock image's default already
+#   allows md5 auth from the docker network, but mounting our own file makes
+#   the auth rules visible/auditable instead of "whatever the image ships".
+# - Redis: password required, maxmemory cap, persistence OFF (no RDB
+#   snapshots, no AOF). This trades "Redis remembers sync-dedup keys across a
+#   restart" for "Redis container never blocks on disk I/O and restarts in
+#   <1s". The dedup keys are short-TTL and the sync logic is idempotent
+#   (re-processing a dup is harmless), so losing them on a rare restart is
+#   acceptable. If you'd rather keep the dev behaviour, set
+#   REDIS_PERSISTENCE=appendonly in .env.prod (see command below).
+# - app runs under Gunicorn supervising Uvicorn workers (not bare uvicorn).
+#   Gunicorn restarts a worker that hangs/crashes; bare uvicorn won't.
+# - restart: always everywhere — a VPS reboot or OOM kill should bring every
+#   container back without manual intervention.
+# - Named volumes: postgres_data, redis_data, nginx_logs, reports_data — all
+#   survive `docker compose down` (only `down -v` removes them).
+# - Single bridge network `fieldtrack_network` — every service can resolve
+#   the others by service name (postgres, redis, app, nginx).
+# - No `version:` key — obsolete in Compose v2.
+
+name: fieldtrack
+
+services:
+  postgres:
+    image: postgis/postgis:15-3.4
+    container_name: fieldtrack-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - max_connections=50
+      - -c
+      - wal_compression=on
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    # NO ports: — not reachable from the host or the internet, only from
+    # other containers on fieldtrack_network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: 1g
+    networks:
+      - fieldtrack_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: fieldtrack-redis
+    restart: always
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      - --maxmemory
+      - 200mb
+      - --maxmemory-policy
+      - volatile-lru
+      # Persistence OFF: no RDB save points, no AOF. See note at top of file.
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    volumes:
+      # Mounted for operational flexibility (e.g. switching persistence back
+      # on later) but unused while --save "" / --appendonly no are set.
+      - redis_data:/data
+    # NO ports: — internal only.
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    mem_limit: 256m
+    networks:
+      - fieldtrack_network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fieldtrack-app:${IMAGE_TAG:-latest}
+    container_name: fieldtrack-app
+    restart: always
+    env_file:
+      - .env.prod
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+    # Gunicorn supervises N Uvicorn workers. 4 is a safe default for 2 vCPU
+    # (gunicorn workers don't need to map 1:1 to cores — they're I/O-bound
+    # async workers, so a small multiple of vCPUs keeps concurrency headroom
+    # without starving Postgres' max_connections=50).
+    command:
+      - gunicorn
+      - app.main:app
+      - -k
+      - uvicorn.workers.UvicornWorker
+      - --workers
+      - "${GUNICORN_WORKERS:-4}"
+      - --bind
+      - 0.0.0.0:8000
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+      - --timeout
+      - "60"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - reports_data:/srv/fieldtrack/reports
+    # NO ports: — only Nginx talks to `app` over fieldtrack_network.
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    mem_limit: 1g
+    networks:
+      - fieldtrack_network
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: fieldtrack-nginx
+    restart: always
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - ./admin-web/dist:/var/www/admin:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - nginx_logs:/var/log/nginx
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/nginx-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    mem_limit: 128m
+    networks:
+      - fieldtrack_network
+
+volumes:
+  postgres_data:
+  redis_data:
+  reports_data:
+  nginx_logs:
+
+networks:
+  fieldtrack_network:
+    driver: bridge
