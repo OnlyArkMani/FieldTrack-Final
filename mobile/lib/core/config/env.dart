@@ -6,6 +6,11 @@ abstract final class Env {
   static String get apiBaseUrl => _require('API_BASE_URL');
   static String get termsUrl => _require('TERMS_URL');
 
+  // Optional — only present in production builds (see mobile/.env.prod.example).
+  // Falls back so existing dev .env files without these keys keep working.
+  static String? get wsBaseUrl => dotenv.maybeGet('WS_BASE_URL');
+  static String get environment => dotenv.maybeGet('ENVIRONMENT') ?? 'development';
+
   static String _require(String key) {
     final value = dotenv.maybeGet(key);
     if (value == null || value.isEmpty) {

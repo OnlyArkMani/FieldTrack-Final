@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../config/env.dart';
@@ -190,6 +191,15 @@ class _ConnectivityInterceptor extends Interceptor {
   @override
   Future<void> onRequest(
       RequestOptions options, RequestInterceptorHandler handler) async {
+    // connectivity_plus's web implementation (navigator.onLine) is unreliable
+    // in dev/iframe contexts and can spuriously report "none" while the API
+    // is perfectly reachable — blocking every request with a false
+    // NoConnectionException. On web we skip this pre-flight check entirely
+    // and let an actual failed request surface as DioExceptionType
+    // .connectionError (still mapped to NoConnectionException below).
+    if (kIsWeb) {
+      return handler.next(options);
+    }
     final result = await Connectivity().checkConnectivity();
     if (result.contains(ConnectivityResult.none)) {
       return handler.reject(
