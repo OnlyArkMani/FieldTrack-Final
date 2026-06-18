@@ -1,7 +1,13 @@
 # FieldTrack — PRODUCTION Docker Compose
 #
-# Run with:  docker compose -f docker-compose.prod.yml up -d
+# Run with:  docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 # Requires:  .env.prod  (copy from .env.prod.example, fill in real secrets)
+#
+# IMPORTANT: always pass `--env-file .env.prod`. Compose only auto-loads a file
+# named `.env`; the ${POSTGRES_USER}/${POSTGRES_PASSWORD}/${REDIS_PASSWORD}/
+# ${IMAGE_TAG} interpolations below come from that flag. Omit it and they
+# resolve to empty strings (Postgres refuses to init, DATABASE_URL is malformed).
+# The CI deploy job (.github/workflows/deploy.yml) already passes it.
 #
 # DECISIONS (explicit):
 # - Postgres and Redis publish NO ports at all — not even to 127.0.0.1. The
