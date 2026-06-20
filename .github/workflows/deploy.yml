@@ -81,7 +81,10 @@ jobs:
           --health-retries 5
 
     env:
-      APP_ENV: test
+      # "development" — not "test": Settings._validate_env (app/core/config.py)
+      # only accepts development|staging|production, so anything else fails
+      # Settings() construction at import/startup time.
+      APP_ENV: development
       DEBUG: "true"
       DATABASE_URL: postgresql+asyncpg://fieldtrack:fieldtrack_test@localhost:5432/fieldtrack_test
       REDIS_URL: redis://localhost:6379/0
