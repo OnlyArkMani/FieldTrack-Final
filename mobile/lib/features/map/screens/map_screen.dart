@@ -125,6 +125,7 @@ class _TodayRoute extends ConsumerWidget {
     final routeAsync = ref.watch(todayRouteProvider);
     final device = ref.watch(deviceLocationProvider).valueOrNull;
     final geofences = ref.watch(geofencesProvider).valueOrNull ?? const <Geofence>[];
+    final showZones = ref.watch(showZonesProvider);
 
     return routeAsync.when(
       loading: () => const Padding(
@@ -153,10 +154,16 @@ class _TodayRoute extends ConsumerWidget {
                 initialZoom: hasRoute ? 15 : 5,
                 minZoom: 3,
                 maxZoom: 18,
+                onTap: (_, latlng) {
+                  if (!showZones) return;
+                  final g = _hitGeofence(geofences, latlng);
+                  if (g != null) _showEmployeeZoneSheet(context, ref, g);
+                },
               ),
               children: [
                 MapService.tileLayer(),
-                if (geofences.isNotEmpty) ...geofenceLayers(geofences),
+                if (showZones && geofences.isNotEmpty)
+                  ...geofenceLayers(geofences),
                 if (hasRoute)
                   _AnimatedRouteLayer(
                     points: points,
@@ -190,6 +197,16 @@ class _TodayRoute extends ConsumerWidget {
                 ),
               ],
             ),
+            if (geofences.isNotEmpty)
+              Positioned(
+                top: AppDimens.grid * 2,
+                right: AppDimens.grid * 2,
+                child: _ZoneToggle(
+                  visible: showZones,
+                  onTap: () => ref.read(showZonesProvider.notifier).state =
+                      !showZones,
+                ),
+              ),
             Positioned(
               left: AppDimens.grid * 2,
               right: AppDimens.grid * 2,
@@ -269,6 +286,7 @@ class _SupervisorMap extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final teamAsync = ref.watch(teamLiveProvider);
     final geofences = ref.watch(geofencesProvider).valueOrNull ?? const <Geofence>[];
+    final showZones = ref.watch(showZonesProvider);
 
     // The map renders in EVERY state — loading, error and empty just change the
     // overlay drawn on top of it. (Previously these returned a non-map widget,
@@ -282,6 +300,8 @@ class _SupervisorMap extends ConsumerWidget {
       ref,
       located: located,
       geofences: geofences,
+      showZones: showZones,
+      teamSize: members.length,
       isLoading: teamAsync.isLoading,
       error: error,
     );
@@ -292,6 +312,8 @@ class _SupervisorMap extends ConsumerWidget {
     WidgetRef ref, {
     required List<TeamLiveMember> located,
     required List<Geofence> geofences,
+    required bool showZones,
+    required int teamSize,
     required bool isLoading,
     required Object? error,
   }) {
@@ -308,11 +330,17 @@ class _SupervisorMap extends ConsumerWidget {
             initialZoom: hasMembers ? 13 : 5,
             minZoom: 3,
             maxZoom: 18,
+            onTap: (_, latlng) {
+              if (!showZones) return;
+              final g = _hitGeofence(geofences, latlng);
+              if (g != null) _showSupervisorZoneSheet(context, g, teamSize);
+            },
           ),
           children: [
             // TileLayer must be the first child or nothing renders.
             MapService.tileLayer(),
-            if (geofences.isNotEmpty) ...geofenceLayers(geofences),
+            if (showZones && geofences.isNotEmpty)
+              ...geofenceLayers(geofences),
             MarkerLayer(
               markers: [
                 for (final m in located)
@@ -329,6 +357,18 @@ class _SupervisorMap extends ConsumerWidget {
             ),
           ],
         ),
+
+        // Show/Hide Zones toggle (top-right), only when there are zones.
+        if (geofences.isNotEmpty)
+          Positioned(
+            top: AppDimens.grid * 2,
+            right: AppDimens.grid * 2,
+            child: _ZoneToggle(
+              visible: showZones,
+              onTap: () =>
+                  ref.read(showZonesProvider.notifier).state = !showZones,
+            ),
+          ),
 
         // ── Overlays (drawn OVER the map, never instead of it) ──────────────
         if (error != null && located.isEmpty)
@@ -682,6 +722,348 @@ String _relative(DateTime dt) {
   if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
   if (diff.inHours < 24) return '${diff.inHours}h ago';
   return '${diff.inDays}d ago';
+}
+
+// ── Geofence zone interaction (Change 2) ─────────────────────────────────────
+
+/// First zone whose boundary contains [p] (field zones don't overlap in
+/// practice). Returns null when the tap missed every zone.
+Geofence? _hitGeofence(List<Geofence> zones, LatLng p) {
+  for (final g in zones) {
+    if (g.contains(p)) return g;
+  }
+  return null;
+}
+
+String _zoneDuration(double minutes) {
+  final m = minutes.round();
+  final h = m ~/ 60;
+  final rem = m % 60;
+  if (h > 0) return '$h hour${h == 1 ? '' : 's'} $rem minute${rem == 1 ? '' : 's'}';
+  return '$rem minute${rem == 1 ? '' : 's'}';
+}
+
+String _zoneRadius(double m) =>
+    m >= 1000 ? '${(m / 1000).toStringAsFixed(m % 1000 == 0 ? 0 : 1)} km' : '${m.round()} m';
+
+String _zoneArea(double? sqm) {
+  if (sqm == null || sqm <= 0) return '—';
+  if (sqm >= 1000000) return '${(sqm / 1000000).toStringAsFixed(2)} km²';
+  return '${sqm.round()} m²';
+}
+
+void _showEmployeeZoneSheet(BuildContext context, WidgetRef ref, Geofence g) {
+  showModalBottomSheet<void>(
+    context: context,
+    backgroundColor: Colors.transparent,
+    builder: (_) => _EmployeeZoneSheet(geofence: g),
+  );
+}
+
+void _showSupervisorZoneSheet(BuildContext context, Geofence g, int teamSize) {
+  showModalBottomSheet<void>(
+    context: context,
+    backgroundColor: Colors.transparent,
+    isScrollControlled: true,
+    builder: (_) => _SupervisorZoneSheet(geofence: g, teamSize: teamSize),
+  );
+}
+
+/// Floating "Show/Hide Zones" pill (top-right of the map). Eye icon swaps with
+/// an AnimatedSwitcher.
+class _ZoneToggle extends StatelessWidget {
+  const _ZoneToggle({required this.visible, required this.onTap});
+  final bool visible;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.appColors;
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: colors.card.withValues(alpha: 0.95),
+      borderRadius: BorderRadius.circular(999),
+      elevation: 2,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+              horizontal: AppDimens.grid * 1.25, vertical: AppDimens.grid * 0.75),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 250),
+                transitionBuilder: (child, anim) =>
+                    FadeTransition(opacity: anim, child: ScaleTransition(scale: anim, child: child)),
+                child: Icon(
+                  visible ? Icons.visibility_rounded : Icons.visibility_off_rounded,
+                  key: ValueKey(visible),
+                  size: 16,
+                  color: scheme.primary,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                visible ? 'Hide Zones' : 'Show Zones',
+                style: AppTextStyles.caption
+                    .copyWith(color: scheme.primary, fontWeight: FontWeight.w600),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Shared rounded sheet container (mirrors _MemberSheet styling).
+class _ZoneSheetShell extends StatelessWidget {
+  const _ZoneSheetShell({required this.child});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.appColors;
+    return Container(
+      decoration: BoxDecoration(
+        color: colors.card,
+        borderRadius: const BorderRadius.vertical(
+          top: Radius.circular(AppDimens.sheetRadius),
+        ),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.all(AppDimens.grid * 3),
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+class _ZoneSheetHeader extends StatelessWidget {
+  const _ZoneSheetHeader({required this.name, required this.scope});
+  final String name;
+  final String scope;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final colors = context.appColors;
+    final isTeam = scope == 'TEAM';
+    return Row(
+      children: [
+        Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: scheme.primary.withValues(alpha: 0.14),
+          ),
+          child: Icon(Icons.place_rounded, color: scheme.primary),
+        ),
+        const SizedBox(width: AppDimens.grid * 1.5),
+        Expanded(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(name,
+                  style: AppTextStyles.heading.copyWith(color: scheme.onSurface),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis),
+              const SizedBox(height: 2),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(isTeam ? Icons.groups_rounded : Icons.public_rounded,
+                      size: 13, color: colors.textSecondary),
+                  const SizedBox(width: 4),
+                  Text(isTeam ? 'Team zone' : 'Universal',
+                      style: AppTextStyles.caption
+                          .copyWith(color: colors.textSecondary)),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _EmployeeZoneSheet extends ConsumerWidget {
+  const _EmployeeZoneSheet({required this.geofence});
+  final Geofence geofence;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final scheme = Theme.of(context).colorScheme;
+    final visitsAsync = ref.watch(employeeZonesTodayProvider);
+    final g = geofence;
+    final shapeLine = g.isCircle
+        ? 'Circle · ${_zoneRadius(g.radiusMeters!)} radius'
+        : 'Polygon · ${_zoneArea(g.areaSqMeters)}';
+
+    return _ZoneSheetShell(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _ZoneSheetHeader(name: g.name, scope: g.scope),
+          const SizedBox(height: AppDimens.grid * 2),
+          _SheetRow(
+            icon: Icons.category_rounded,
+            label: 'Shape',
+            value: shapeLine,
+          ),
+          visitsAsync.when(
+            loading: () => const Padding(
+              padding: EdgeInsets.symmetric(vertical: AppDimens.grid * 1.5),
+              child: LinearProgressIndicator(minHeight: 2),
+            ),
+            error: (_, __) => _SheetRow(
+              icon: Icons.timelapse_rounded,
+              label: 'Today',
+              value: 'Unavailable',
+            ),
+            data: (map) {
+              final v = map[g.id];
+              final value = (v != null && v.totalMinutes > 0)
+                  ? _zoneDuration(v.totalMinutes)
+                  : 'Not visited yet';
+              return _SheetRow(
+                icon: Icons.timelapse_rounded,
+                label: 'You visited today',
+                value: value,
+              );
+            },
+          ),
+          const SizedBox(height: AppDimens.grid),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Text(
+              'Tap a zone for details',
+              style: AppTextStyles.caption
+                  .copyWith(color: scheme.onSurface.withValues(alpha: 0.4)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SupervisorZoneSheet extends ConsumerWidget {
+  const _SupervisorZoneSheet({required this.geofence, required this.teamSize});
+  final Geofence geofence;
+  final int teamSize;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final colors = context.appColors;
+    final scheme = Theme.of(context).colorScheme;
+    final presenceAsync = ref.watch(zonePresenceProvider(geofence.id));
+
+    return _ZoneSheetShell(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _ZoneSheetHeader(name: geofence.name, scope: geofence.scope),
+          const SizedBox(height: AppDimens.grid * 2),
+          presenceAsync.when(
+            loading: () => const Padding(
+              padding: EdgeInsets.symmetric(vertical: AppDimens.grid * 2),
+              child: Center(child: CircularProgressIndicator(strokeWidth: 2.4)),
+            ),
+            error: (_, __) => Text(
+              "Couldn't load today's visits.",
+              style: AppTextStyles.body.copyWith(color: scheme.onSurface),
+            ),
+            data: (list) {
+              // Aggregate dwell per member; null duration => still inside.
+              final byUser = <int, ({String name, double minutes, bool inside})>{};
+              for (final p in list) {
+                final cur = byUser[p.userId];
+                final add = p.durationMinutes ?? 0;
+                byUser[p.userId] = (
+                  name: p.employeeName ?? 'Employee ${p.userId}',
+                  minutes: (cur?.minutes ?? 0) + add,
+                  inside: (cur?.inside ?? false) || p.durationMinutes == null,
+                );
+              }
+              final visited = byUser.length;
+              final entries = byUser.values.toList()
+                ..sort((a, b) => b.minutes.compareTo(a.minutes));
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: AppDimens.grid * 1.5,
+                        vertical: AppDimens.grid),
+                    decoration: BoxDecoration(
+                      color: scheme.primary.withValues(alpha: 0.10),
+                      borderRadius: BorderRadius.circular(AppDimens.buttonRadius),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.groups_rounded, size: 18, color: scheme.primary),
+                        const SizedBox(width: AppDimens.grid),
+                        Expanded(
+                          child: Text(
+                            '$visited of $teamSize team member${teamSize == 1 ? '' : 's'} visited today',
+                            style: AppTextStyles.bodyMedium
+                                .copyWith(color: scheme.onSurface),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: AppDimens.grid * 1.5),
+                  if (entries.isEmpty)
+                    Text('No team members entered this zone today.',
+                        style: AppTextStyles.body
+                            .copyWith(color: colors.textSecondary))
+                  else
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 280),
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: entries.length,
+                        separatorBuilder: (_, __) =>
+                            const SizedBox(height: AppDimens.grid * 0.5),
+                        itemBuilder: (_, i) {
+                          final e = entries[i];
+                          final dwell = e.inside
+                              ? 'Inside now'
+                              : _zoneDuration(e.minutes);
+                          return _SheetRow(
+                            icon: Icons.person_rounded,
+                            label: e.name,
+                            value: dwell,
+                          );
+                        },
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// A compact, centred card drawn ON TOP of the live map (the map keeps its

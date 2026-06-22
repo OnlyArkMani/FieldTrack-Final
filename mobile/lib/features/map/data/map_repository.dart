@@ -37,11 +37,31 @@ class MapRepository {
         .toList();
   }
 
-  /// Active polygon geofences to render on the map.
+  /// Active geofences to render on the map (already role/team-scoped server-side).
   Future<List<Geofence>> geofences() async {
     final data = await _api.getList('/geofences');
     return data
         .map((e) => Geofence.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Zones the employee visited today (geofence_id → visits + minutes).
+  Future<List<ZoneVisit>> employeeZonesToday(int userId, {DateTime? date}) async {
+    final query = <String, dynamic>{};
+    if (date != null) query['date'] = _ymd(date);
+    final data = await _api.getList('/geofences/employee/$userId/today', query: query);
+    return data
+        .map((e) => ZoneVisit.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Who from the team was inside [geofenceId] today (ENTER/EXIT pairs + dwell).
+  Future<List<ZonePresence>> zonePresence(int geofenceId, {DateTime? date}) async {
+    final query = <String, dynamic>{};
+    if (date != null) query['date'] = _ymd(date);
+    final data = await _api.getList('/geofences/$geofenceId/presence', query: query);
+    return data
+        .map((e) => ZonePresence.fromJson(e as Map<String, dynamic>))
         .toList();
   }
 
