@@ -5,7 +5,7 @@ attendance (user_id, date) and location_logs (user_id, timestamp).
 """
 from datetime import date, datetime
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -151,6 +151,29 @@ class ReportRepository:
                 (int(gid), str(name), etype_val, ts)
             )
         return out
+
+    async def assigned_geofences_for_team(
+        self, team_id: int
+    ) -> list[dict]:
+        """Active geofences a team is responsible for: every UNIVERSAL zone plus
+        the TEAM zones assigned to this team. Used by the compliance report to
+        know the full set of zones each employee is expected to visit."""
+        rows = await self.db.execute(
+            text(
+                """
+                SELECT id, name, scope
+                FROM geofences
+                WHERE is_active = true
+                  AND (
+                        scope = 'UNIVERSAL'
+                        OR (scope = 'TEAM' AND team_id = :team_id)
+                      )
+                ORDER BY name ASC
+                """
+            ),
+            {"team_id": team_id},
+        )
+        return [dict(r) for r in rows.mappings().all()]
 
     async def get_team(self, team_id: int) -> Team | None:
         return await self.db.get(Team, team_id)

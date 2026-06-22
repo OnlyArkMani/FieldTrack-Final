@@ -64,12 +64,14 @@ async def generate_report(
             detail="End date cannot be in the future.",
         )
 
-    # The distance + zone-time report is tabular-only (keeps generation fast and
-    # there's no useful single-page PDF layout for it).
-    if body.type is ReportType.DISTANCE_ZONES and body.format is ReportFormat.PDF:
+    # Tabular-only report types (no useful single-page PDF layout; keeps
+    # generation fast). Distance & Zone Time and Geofence Compliance are
+    # CSV/Excel only — server-enforced here in addition to the UI hiding PDF.
+    _TABULAR_ONLY = {ReportType.DISTANCE_ZONES, ReportType.GEOFENCE_COMPLIANCE}
+    if body.type in _TABULAR_ONLY and body.format is ReportFormat.PDF:
         raise HTTPException(
             status_code=400,
-            detail="Distance report is available in CSV and Excel only",
+            detail="This report is available in CSV and Excel only",
             headers={"X-Error-Code": "FORMAT_NOT_SUPPORTED"},
         )
 

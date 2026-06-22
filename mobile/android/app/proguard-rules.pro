@@ -35,6 +35,25 @@
 -keep class com.baseflow.geolocator.** { *; }
 -keep class com.lyokone.location.** { *; }
 
+# ── background_locator_2 (CRITICAL) ──────────────────────────────────────
+# The foreground-service callback dispatcher (IsolateHolderService + the Dart
+# @pragma('vm:entry-point') entrypoint registrar) is invoked by NAME from the
+# native side. If R8 renames/strips these classes the background GPS isolate
+# never starts — and it fails ONLY in release builds, silently. The plugin's
+# Android package is `yukams.app.background_locator_2`.
+-keep class yukams.app.background_locator_2.** { *; }
+-keep class yukams.app.** { *; }
+# Keep any class/members annotated as a VM entry-point (Flutter background
+# isolates / plugin callback registrants).
+-keepclasseswithmembers class * {
+    @androidx.annotation.Keep <methods>;
+}
+-keep @androidx.annotation.Keep class * { *; }
+
+# ── flutter_local_notifications ──────────────────────────────────────────
+-keep class com.dexterous.** { *; }
+-dontwarn com.dexterous.**
+
 # ── General Dart/Kotlin reflection safety ────────────────────────────────
 -keepattributes Signature, *Annotation*, EnclosingMethod, InnerClasses
 -keepclassmembers class * {

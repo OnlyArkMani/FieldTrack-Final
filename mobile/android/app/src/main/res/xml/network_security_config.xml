@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Release security posture: cleartext (plain HTTP) is DISABLED app-wide, so a
+  misconfigured or downgraded endpoint can never transmit attendance/location
+  data in the clear. All traffic must be HTTPS.
+
+  Local development against an http:// dev server is handled by the DEBUG
+  manifest (src/debug/AndroidManifest.xml), which points to
+  network_security_config_debug.xml and allows cleartext to private LAN hosts
+  only. The release APK uses THIS file.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

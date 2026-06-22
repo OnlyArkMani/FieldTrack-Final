@@ -3,6 +3,7 @@ import dayjs from 'dayjs';
 import { Download, FileSpreadsheet, AlertCircle, Loader2 } from 'lucide-react';
 
 import { api, apiErrorMessage } from '@/services/api/client';
+import { useTeams } from '@/hooks/useTeams';
 import PageHeader from '@/components/ui/PageHeader';
 import Card, { CardHeader } from '@/components/ui/Card';
 import Button from '@/components/ui/Button';
@@ -16,6 +17,7 @@ const REPORT_TYPES = [
   { value: 'ATTENDANCE', label: 'Attendance' },
   { value: 'DISTANCE', label: 'Distance' },
   { value: 'DISTANCE_ZONES', label: 'Distance & Zone Time' },
+  { value: 'GEOFENCE_COMPLIANCE', label: 'Geofence Compliance' },
 ];
 
 const ALL_FORMATS = [
@@ -25,12 +27,16 @@ const ALL_FORMATS = [
 ];
 
 // Report types that don't support PDF (tabular-only, server-enforced too).
-const NO_PDF_TYPES = new Set(['DISTANCE_ZONES']);
+const NO_PDF_TYPES = new Set(['DISTANCE_ZONES', 'GEOFENCE_COMPLIANCE']);
+// Report types that REQUIRE a team_id filter.
+const TEAM_REQUIRED_TYPES = new Set(['GEOFENCE_COMPLIANCE']);
 
 export default function ReportsPage() {
   const today = dayjs().format('YYYY-MM-DD');
+  const { data: teams = [] } = useTeams();
   const [type, setType] = useState('ATTENDANCE');
   const [format, setFormat] = useState('EXCEL');
+  const [teamId, setTeamId] = useState('');
   const [startDate, setStartDate] = useState(dayjs().subtract(29, 'day').format('YYYY-MM-DD'));
   const [endDate, setEndDate] = useState(today);
 
@@ -52,6 +58,9 @@ export default function ReportsPage() {
 
   const noPdf = NO_PDF_TYPES.has(type);
   const formats = noPdf ? ALL_FORMATS.filter((f) => f.value !== 'PDF') : ALL_FORMATS;
+  const teamRequired = TEAM_REQUIRED_TYPES.has(type);
+  const teamMissing = teamRequired && !teamId;
+  const isCompliance = type === 'GEOFENCE_COMPLIANCE';
 
   // Max end date = start + 31 days, never in the future.
   const capDate = (start) => {
@@ -113,14 +122,18 @@ export default function ReportsPage() {
   };
 
   const generate = async () => {
-    if (rangeTooLong) return;
+    if (rangeTooLong || teamMissing) return;
     resetResult();
     setPhase('generating');
     try {
       const { data } = await api.post('/reports/generate', {
         type,
         format,
-        filters: { start_date: startDate, end_date: endDate },
+        filters: {
+          start_date: startDate,
+          end_date: endDate,
+          ...(teamId ? { team_id: Number(teamId) } : {}),
+        },
       });
       setReportId(data.report_id);
       pollStatus(data.report_id);
@@ -189,6 +202,21 @@ export default function ReportsPage() {
               disabled={busy}
             />
           </div>
+          {teamRequired && (
+            <div className="w-56">
+              <Select
+                label={<>Team <span className="text-danger">*</span></>}
+                value={teamId}
+                onChange={(e) => { setTeamId(e.target.value); resetResult(); }}
+                disabled={busy}
+              >
+                <option value="">Select a team…</option>
+                {teams.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </Select>
+            </div>
+          )}
           <div className="w-40">
             <Select label="Format" value={format} onChange={(e) => { setFormat(e.target.value); resetResult(); }} disabled={busy}>
               {formats.map((f) => (
@@ -196,7 +224,7 @@ export default function ReportsPage() {
               ))}
             </Select>
           </div>
-          <Button icon={FileSpreadsheet} onClick={generate} loading={busy} disabled={rangeTooLong || busy}>
+          <Button icon={FileSpreadsheet} onClick={generate} loading={busy} disabled={rangeTooLong || busy || teamMissing}>
             Generate
           </Button>
           <Button
@@ -211,11 +239,19 @@ export default function ReportsPage() {
         </div>
 
         <p className="mt-2 text-xs italic text-text-secondary">Max 31 days per report.</p>
-        {noPdf && (
+        {isCompliance ? (
+          <p className="mt-1 text-xs text-text-secondary">
+            Shows whether employees visited their assigned zones, with time spent per zone.
+            Requires a team. Available in Excel and CSV only.
+          </p>
+        ) : noPdf && (
           <p className="mt-1 text-xs text-text-secondary">
             Shows distance traveled and time spent in each geofence zone per employee per day.
             Available in Excel and CSV only.
           </p>
+        )}
+        {teamMissing && (
+          <p className="mt-2 text-sm text-danger">Select a team to generate this report.</p>
         )}
         {rangeTooLong && (
           <p className="mt-2 text-sm text-danger">Please select a date range of 31 days or less.</p>

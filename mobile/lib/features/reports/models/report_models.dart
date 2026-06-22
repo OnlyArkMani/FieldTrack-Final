@@ -5,6 +5,7 @@ enum ReportType {
   attendance('ATTENDANCE', 'Attendance', Icons.fact_check_rounded),
   distance('DISTANCE', 'Distance', Icons.route_rounded),
   distanceZones('DISTANCE_ZONES', 'Zone Report', Icons.pin_drop_rounded),
+  compliance('GEOFENCE_COMPLIANCE', 'Compliance', Icons.checklist_rounded),
   team('TEAM', 'Team overview', Icons.groups_rounded);
 
   const ReportType(this.wire, this.label, this.icon);
@@ -13,7 +14,17 @@ enum ReportType {
   final IconData icon;
 
   /// Tabular-only report types: the backend rejects PDF for these.
-  bool get supportsPdf => this != ReportType.distanceZones;
+  bool get supportsPdf =>
+      this != ReportType.distanceZones && this != ReportType.compliance;
+
+  /// Report types that need a team_id (server returns 400 without one). TEAM
+  /// uses a month; COMPLIANCE uses a date range — both require a team.
+  bool get requiresTeam =>
+      this == ReportType.team || this == ReportType.compliance;
+
+  /// Supervisor-only report types (employees don't see these chips).
+  bool get supervisorOnly =>
+      this == ReportType.team || this == ReportType.compliance;
 }
 
 /// Output file format. Mirrors the backend ReportFormat.

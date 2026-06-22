@@ -36,6 +36,9 @@ CREAM = "FFF8E7"
 DARK = "1A1A2E"
 PURPLE = "8B7FD4"
 WHITE = "FFFFFF"
+# Compliance conditional-formatting tints (light backgrounds, readable text).
+LIGHT_GREEN = "E6F4EA"  # visited
+LIGHT_CORAL = "FBE3E1"  # not visited
 
 
 def render_report(data: ReportData, fmt: ReportFormat) -> bytes:
@@ -100,6 +103,11 @@ def _render_excel(data: ReportData) -> bytes:
     zebra_fill = PatternFill("solid", fgColor=CREAM)
     title_font = Font(bold=True, color=DARK, size=14)
     label_font = Font(bold=True, color=DARK)
+    # Conditional-formatting fills for the compliance report (row_styles).
+    visited_fill = PatternFill("solid", fgColor=LIGHT_GREEN)
+    not_visited_fill = PatternFill("solid", fgColor=LIGHT_CORAL)
+    summary_fill = PatternFill("solid", fgColor=AMBER)
+    summary_font = Font(bold=True, color=DARK)
 
     wb = Workbook()
 
@@ -129,10 +137,29 @@ def _render_excel(data: ReportData) -> bytes:
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
+        n_cols = len(table.columns)
         for i, row in enumerate(table.rows, start=2):
             sheet.append(["" if c is None else _csv_safe(c) for c in row])
-            if i % 2 == 0:  # zebra stripe even data rows
-                for col_idx in range(1, len(table.columns) + 1):
+            # Conditional formatting (compliance) overrides zebra striping when a
+            # per-row style tag is present; otherwise fall back to zebra stripes.
+            style_tag = (
+                table.row_styles[i - 2]
+                if table.row_styles and (i - 2) < len(table.row_styles)
+                else None
+            )
+            if style_tag == "summary":
+                for col_idx in range(1, n_cols + 1):
+                    cell = sheet.cell(row=i, column=col_idx)
+                    cell.fill = summary_fill
+                    cell.font = summary_font
+            elif style_tag == "visited":
+                for col_idx in range(1, n_cols + 1):
+                    sheet.cell(row=i, column=col_idx).fill = visited_fill
+            elif style_tag == "not_visited":
+                for col_idx in range(1, n_cols + 1):
+                    sheet.cell(row=i, column=col_idx).fill = not_visited_fill
+            elif i % 2 == 0:  # zebra stripe even data rows (default tables)
+                for col_idx in range(1, n_cols + 1):
                     sheet.cell(row=i, column=col_idx).fill = zebra_fill
             for c in table.numeric_cols:
                 sheet.cell(row=i, column=c + 1).alignment = Alignment(

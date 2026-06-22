@@ -58,6 +58,10 @@ class ReportTable:
     rows: list[list[Any]]
     # Right-align these column indices in Excel/PDF (numeric columns).
     numeric_cols: set[int] = field(default_factory=set)
+    # Optional per-row style tag (parallel to `rows`) for conditional formatting
+    # in Excel: 'visited' (light green), 'not_visited' (light coral),
+    # 'summary' (amber). None => default zebra striping. Ignored by CSV.
+    row_styles: list[str | None] = field(default_factory=list)
 
 
 @dataclass
@@ -111,6 +115,9 @@ class ReportService:
         if type_ is ReportType.TEAM:
             return await self._authorize_team(actor, filters)
 
+        if type_ is ReportType.GEOFENCE_COMPLIANCE:
+            return await self._authorize_compliance(actor, filters)
+
         # ATTENDANCE / DISTANCE
         start, end = self._resolve_range(filters.start_date, filters.end_date)
 
@@ -150,6 +157,34 @@ class ReportService:
             type=ReportType.TEAM, start=start, end=end, team_id=team.id,
             user_id=None, status=None, scope_label=f"Team: {team.name}",
             month=month.replace(day=1),
+        )
+
+    async def _authorize_compliance(
+        self, actor: User, filters: ReportFilters
+    ) -> NormalizedReport:
+        """Geofence-compliance is team-scoped and date-ranged. team_id is
+        MANDATORY here (the report answers "did THIS team visit their zones")."""
+        if actor.role == UserRole.EMPLOYEE:
+            raise forbidden("Employees cannot generate compliance reports")
+        if filters.team_id is None:
+            raise bad_request("team_id is required for a geofence compliance report")
+        team = await self.repo.get_team(filters.team_id)
+        if team is None:
+            raise not_found("Team not found")
+        if actor.role == UserRole.SUPERVISOR:
+            supervised = await self.repo.supervised_team_ids(actor.id)
+            if filters.team_id not in supervised:
+                raise forbidden("You don't supervise this team")
+
+        start, end = self._resolve_range(filters.start_date, filters.end_date)
+        return NormalizedReport(
+            type=ReportType.GEOFENCE_COMPLIANCE,
+            start=start,
+            end=end,
+            team_id=team.id,
+            user_id=None,
+            status=None,
+            scope_label=f"Team: {team.name}",
         )
 
     async def _authorize_supervisor_range(
@@ -230,6 +265,8 @@ class ReportService:
             return await self._distance_data(n)
         if n.type is ReportType.DISTANCE_ZONES:
             return await self._distance_zones_data(n)
+        if n.type is ReportType.GEOFENCE_COMPLIANCE:
+            return await self._geofence_compliance_data(n)
         return await self._team_data(n)
 
     async def _attendance_data(self, n: NormalizedReport) -> ReportData:
@@ -455,6 +492,157 @@ class ReportService:
                 numeric_cols={2, 4},
             )],
             filename_stem=f"distance_zones_{n.start}_{n.end}",
+        )
+
+    async def _geofence_compliance_data(self, n: NormalizedReport) -> ReportData:
+        """Did each team member visit their assigned zones, and for how long?
+
+        For every (employee, day, assigned-zone) we emit a row: visited?,
+        first entry, last exit, total dwell minutes, visit count. A per-employee
+        summary row (zones assigned / visited / compliance %) closes each block.
+        Assigned zones = universal + this team's zones."""
+        assert n.team_id is not None
+        team = await self.repo.get_team(n.team_id)
+        members = await self.repo.team_members(n.team_id)
+        zones = await self.repo.assigned_geofences_for_team(n.team_id)
+        user_ids = [m.id for m in members]
+        events = await self.repo.geofence_events_in_range(
+            start=n.start, end=n.end, user_ids=user_ids
+        )
+
+        days = self._date_span(n.start, n.end)
+
+        columns = [
+            "Employee", "Date", "Zone", "Scope", "Visited",
+            "First Entry", "Last Exit", "Dwell (min)", "Visits",
+        ]
+        table_rows: list[list[Any]] = []
+        row_styles: list[str | None] = []
+
+        grand_assigned = 0
+        grand_visited = 0
+
+        for member in members:  # already ordered by name
+            # Track, across the range, which zones this member visited at least
+            # once (for the per-employee compliance summary).
+            visited_zone_ids: set[int] = set()
+            emp_total_dwell = 0
+            emp_total_visits = 0
+
+            for day in days:
+                day_events = events.get((member.id, day), [])
+                # Bucket the day's events by geofence id.
+                by_zone: dict[int, list[tuple[str, datetime]]] = {}
+                for gid, _name, etype, ts in day_events:
+                    by_zone.setdefault(gid, []).append((etype, self._aware(ts)))
+
+                for z in zones:
+                    gid = z["id"]
+                    zevents = by_zone.get(gid, [])
+                    (
+                        visited,
+                        first_entry,
+                        last_exit,
+                        dwell_min,
+                        visit_count,
+                    ) = self._zone_day_compliance(zevents)
+
+                    if visited:
+                        visited_zone_ids.add(gid)
+                        emp_total_dwell += dwell_min
+                        emp_total_visits += visit_count
+
+                    table_rows.append([
+                        member.name,
+                        day.isoformat(),
+                        z["name"],
+                        z["scope"],
+                        "Yes" if visited else "No",
+                        self._fmt_time(first_entry) if first_entry else "—",
+                        self._fmt_time(last_exit) if last_exit else "—",
+                        dwell_min if visited else "—",
+                        visit_count if visited else 0,
+                    ])
+                    row_styles.append("visited" if visited else "not_visited")
+
+            assigned = len(zones)
+            visited_n = len(visited_zone_ids)
+            rate = (visited_n / assigned * 100) if assigned else 0.0
+            grand_assigned += assigned
+            grand_visited += visited_n
+
+            table_rows.append([
+                f"TOTAL — {member.name}",
+                "",
+                f"{visited_n}/{assigned} zones visited",
+                "",
+                f"{rate:.0f}%",
+                "",
+                "",
+                emp_total_dwell,
+                emp_total_visits,
+            ])
+            row_styles.append("summary")
+
+        overall_rate = (grand_visited / grand_assigned * 100) if grand_assigned else 0.0
+        summary = [
+            ("Team", team.name if team else str(n.team_id)),
+            ("Members", str(len(members))),
+            ("Assigned zones", str(len(zones))),
+            ("Overall compliance", f"{overall_rate:.0f}%"),
+        ]
+        return ReportData(
+            title="Geofence Compliance Report",
+            subtitle=self._range_text(n.start, n.end),
+            filters_text=self._filters_text(n),
+            generated_at=datetime.now(timezone.utc),
+            summary=summary,
+            tables=[ReportTable(
+                name="Compliance",
+                columns=columns,
+                rows=table_rows,
+                numeric_cols={7, 8},
+                row_styles=row_styles,
+            )],
+            filename_stem=f"geofence_compliance_{n.start}_{n.end}",
+        )
+
+    @staticmethod
+    def _date_span(start: date, end: date) -> list[date]:
+        return [start + timedelta(days=i) for i in range((end - start).days + 1)]
+
+    @classmethod
+    def _zone_day_compliance(
+        cls, zevents: list[tuple[str, datetime]]
+    ) -> tuple[bool, datetime | None, datetime | None, int, int]:
+        """From one zone's ENTER/EXIT events for one day (ordered by time),
+        derive (visited, first_entry, last_exit, dwell_minutes, visit_count).
+        Dwell sums closed ENTER→EXIT pairs; an unclosed ENTER contributes 0."""
+        first_entry: datetime | None = None
+        last_exit: datetime | None = None
+        visit_count = 0
+        dwell_seconds = 0.0
+        open_enter: datetime | None = None
+
+        for etype, ts in zevents:
+            if etype == "ENTER":
+                visit_count += 1
+                if first_entry is None:
+                    first_entry = ts
+                open_enter = ts
+            elif etype == "EXIT":
+                last_exit = ts
+                if open_enter is not None and ts > open_enter:
+                    dwell_seconds += (ts - open_enter).total_seconds()
+                    open_enter = None
+
+        visited = visit_count > 0
+        return (
+            visited,
+            first_entry,
+            last_exit,
+            int(round(dwell_seconds / 60.0)),
+            visit_count,
         )
 
     async def _team_data(self, n: NormalizedReport) -> ReportData:

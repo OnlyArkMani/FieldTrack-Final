@@ -53,8 +53,9 @@ class ReportsScreen extends ConsumerWidget {
                     runSpacing: AppDimens.grid,
                     children: [
                       for (final t in ReportType.values)
-                        // Employees can't run team reports.
-                        if (isSupervisor || t != ReportType.team)
+                        // Supervisor-only reports (team overview, compliance)
+                        // are hidden from employees.
+                        if (isSupervisor || !t.supervisorOnly)
                           _SelectChip(
                             label: t.label,
                             icon: t.icon,
@@ -82,7 +83,10 @@ class ReportsScreen extends ConsumerWidget {
             if (isSupervisor) ...[
               _TeamSelector(
                 value: state.teamId,
-                isRequired: state.isTeamReport,
+                isRequired: state.type.requiresTeam,
+                // Compliance is locked to the supervisor's own team (pre-
+                // selected, not changeable).
+                locked: state.type == ReportType.compliance,
                 enabled: !busy,
                 onChanged: notifier.setTeam,
               ),
@@ -184,21 +188,38 @@ class _TeamSelector extends ConsumerWidget {
     required this.isRequired,
     required this.enabled,
     required this.onChanged,
+    this.locked = false,
   });
 
   final int? value;
   final bool isRequired;
   final bool enabled;
+  final bool locked; // compliance: pre-select own team, can't change it
   final ValueChanged<int?> onChanged;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final teams = ref.watch(teamListProvider).teams;
+
+    // Locked (compliance): default to the supervisor's first/own team and keep
+    // the control read-only.
+    if (locked && value == null && teams.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) onChanged(teams.first.id);
+      });
+    }
+    final canEdit = enabled && !locked;
+
     return AppCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(isRequired ? 'Team (required)' : 'Team (optional scope)',
+          Text(
+              locked
+                  ? 'Team (your team)'
+                  : isRequired
+                      ? 'Team (required)'
+                      : 'Team (optional scope)',
               style: AppTextStyles.bodyMedium
                   .copyWith(color: Theme.of(context).colorScheme.onSurface)),
           const SizedBox(height: AppDimens.grid),
@@ -218,7 +239,7 @@ class _TeamSelector extends ConsumerWidget {
                   child: Text(t.name, maxLines: 1, overflow: TextOverflow.ellipsis),
                 ),
             ],
-            onChanged: enabled ? onChanged : null,
+            onChanged: canEdit ? onChanged : null,
           ),
         ],
       ),

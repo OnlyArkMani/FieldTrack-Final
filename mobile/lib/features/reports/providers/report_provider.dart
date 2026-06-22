@@ -118,7 +118,7 @@ class ReportNotifier extends Notifier<ReportUiState> {
 
   // ── Generate + poll ───────────────────────────────────────────────────
   Future<void> generate() async {
-    if (state.isTeamReport && state.teamId == null) {
+    if (state.type.requiresTeam && state.teamId == null) {
       state = state.copyWith(phase: ReportPhase.failed, error: 'Select a team first');
       return;
     }

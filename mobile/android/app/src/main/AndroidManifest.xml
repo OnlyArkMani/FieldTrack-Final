@@ -46,7 +46,15 @@
         android:label="FieldTrack"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:enableOnBackInvokedCallback="true">
+        android:enableOnBackInvokedCallback="true"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:networkSecurityConfig="@xml/network_security_config">
+        <!-- allowBackup=false: blocks ADB/cloud backup extraction of the local
+             SQLite attendance/location cache and stored JWT (security).
+             networkSecurityConfig: HTTPS-only in release (no cleartext); the
+             debug build (src/debug) relaxes this for local dev servers. -->
 
         <activity
             android:name=".MainActivity"
