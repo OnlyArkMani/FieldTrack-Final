@@ -8,7 +8,7 @@ plugins {
 
 android {
     namespace = "com.fieldtrack.app"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -25,7 +25,7 @@ android {
         minSdk = maxOf(21, flutter.minSdkVersion)
         // targetSdk pinned to 34 (Android 14) per spec — the foreground
         // location service behaviour we depend on is governed by API 34 rules.
-        targetSdk = 34
+        targetSdk = 36
         // Driven by pubspec `version:` (currently 0.1.0+1 => versionName 0.1.0,
         // versionCode 1). Bump the pubspec build number before each store
         // upload; Play rejects a duplicate versionCode.

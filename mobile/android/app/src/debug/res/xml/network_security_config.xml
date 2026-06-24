@@ -2,21 +2,20 @@
 <!--
   DEBUG-ONLY override (src/debug resources shadow src/main of the same name, so
   this file is used ONLY in debug builds; the release APK uses the strict
-  src/main version). Permits cleartext to localhost + private LAN ranges so
-  `flutter run` can hit an http:// dev backend (e.g. 10.0.2.2 emulator host,
-  192.168.x.x). Public traffic still requires HTTPS.
+  src/main version, which keeps cleartext DISABLED app-wide).
+
+  Cleartext (http://) is permitted for ALL hosts in debug because a dev backend
+  can live on any address depending on the setup: 10.0.2.2 (emulator host),
+  a laptop's LAN IP, or — when the laptop is tethered to the phone's hotspot —
+  a hotspot-assigned IP like 192.168.43.x. The previous per-IP <domain> list
+  was both brittle (Android <domain> entries are literal hostnames, NOT CIDR
+  ranges — "192.168.1.0" never matched 192.168.1.5) and incomplete (missed the
+  hotspot subnet). Blanket cleartext is safe here: it only affects debug builds.
 -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false">
+    <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">localhost</domain>
-        <domain includeSubdomains="true">10.0.2.2</domain>
-        <domain includeSubdomains="true">127.0.0.1</domain>
-        <domain includeSubdomains="true">192.168.0.0</domain>
-        <domain includeSubdomains="true">192.168.1.0</domain>
-    </domain-config>
 </network-security-config>

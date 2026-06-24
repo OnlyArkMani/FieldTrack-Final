@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FieldTrack launch mark: amber rounded-square tile with a dark location pin,
+  matching the in-code logo in lib/features/splash/splash_screen.dart. Pure
+  vector so it stays crisp at every density and needs no PNG generation.
+  Intrinsic 96dp; rendered centered by launch_background.xml and used as the
+  Android 12+ windowSplashScreenAnimatedIcon.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+    <!-- Amber rounded square (radius 20) -->
+    <path
+        android:fillColor="@color/brand_amber"
+        android:pathData="M20,0 L76,0 A20,20 0 0,1 96,20 L96,76 A20,20 0 0,1 76,96 L20,96 A20,20 0 0,1 0,76 L0,20 A20,20 0 0,1 20,0 Z" />
+    <!-- Material location_on pin (24-unit path) scaled 2.2x and centered -->
+    <group
+        android:scaleX="2.2"
+        android:scaleY="2.2"
+        android:translateX="21.6"
+        android:translateY="21.6">
+        <path
+            android:fillColor="@color/brand_pin"
+            android:pathData="M12,2C8.13,2 5,5.13 5,9c0,5.25 7,13 7,13s7,-7.75 7,-13c0,-3.87 -3.13,-7 -7,-7zM12,11.5c-1.38,0 -2.5,-1.12 -2.5,-2.5s1.12,-2.5 2.5,-2.5 2.5,1.12 2.5,2.5 -1.12,2.5 -2.5,2.5z" />
+    </group>
+</vector>

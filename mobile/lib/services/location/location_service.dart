@@ -1,6 +1,11 @@
+import 'dart:async';
 import 'dart:ui';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
+// Prefixed: background_locator_2 also exports a `LocationAccuracy`, so the
+// geolocator symbols (used only on the web path) must be disambiguated.
+import 'package:geolocator/geolocator.dart' as geo;
 import 'package:background_locator_2/background_locator.dart';
 import 'package:background_locator_2/location_dto.dart';
 import 'package:background_locator_2/settings/android_settings.dart';
@@ -44,6 +49,12 @@ class LocationService {
 
   bool _initialized = false;
 
+  // Web only: foreground poll timer. The web target has no background isolate,
+  // no SQLite queue and no foreground service, so location is produced by a
+  // simple timer that reads the browser Geolocation API and posts straight to
+  // /location/batch while attendance is active.
+  Timer? _webPoll;
+
   Future<void> initialize() async {
     if (_initialized) return;
     // background_locator_2 is Android-only (getCallbackHandle is
@@ -57,7 +68,10 @@ class LocationService {
     _initialized = true;
   }
 
-  Future<bool> isTracking() => BackgroundLocator.isServiceRunning();
+  Future<bool> isTracking() async {
+    if (kIsWeb) return _webPoll != null;
+    return BackgroundLocator.isServiceRunning();
+  }
 
   /// Single entry point — the attendance flow calls this after EVERY state
   /// change and on every rehydrate (app boot, resume). Idempotent: it
@@ -67,13 +81,27 @@ class LocationService {
     required MachineState state,
     int? attendanceId,
   }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(kUserIdPref, userId);
+
+    // WEB: no SQLite / background isolate / foreground service. The native DB
+    // call below would throw here (sqflite has no web backend), so branch first
+    // and drive a lightweight foreground poster instead, so a browser session
+    // still shows up online, on the live map, and in the trail.
+    if (kIsWeb) {
+      if (state.isWorking) {
+        await _startWebTracking();
+      } else {
+        await stop();
+      }
+      return;
+    }
+
     await DatabaseHelper.instance.updateLocalAttendanceState(
       userId,
       currentState: state.wire,
       todayAttendanceId: attendanceId,
     );
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(kUserIdPref, userId);
 
     final running = await isTracking();
     if (state.isWorking && !running) {
@@ -120,7 +148,75 @@ class LocationService {
   }
 
   Future<void> stop() async {
+    if (kIsWeb) {
+      _webPoll?.cancel();
+      _webPoll = null;
+      return;
+    }
     await BackgroundLocator.unRegisterLocationUpdate();
+  }
+
+  // ── WEB foreground location poster ─────────────────────────────────────
+  // Posts the current browser position to /location/batch on a 30s cadence
+  // while attendance is active (well inside the backend's 5-min "active"
+  // window). No SQLite / offline queue — a browser session is online by
+  // definition. The record shape mirrors the native sync path exactly, so the
+  // backend, live map and trail treat web and device fixes identically.
+  Future<void> _startWebTracking() async {
+    if (_webPoll != null) return; // already polling
+    await _postCurrentWebFix(); // immediate first fix → appears at once
+    _webPoll = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => _postCurrentWebFix(),
+    );
+  }
+
+  Future<void> _postCurrentWebFix() async {
+    try {
+      var perm = await geo.Geolocator.checkPermission();
+      if (perm == geo.LocationPermission.denied) {
+        perm = await geo.Geolocator.requestPermission();
+      }
+      if (perm == geo.LocationPermission.denied ||
+          perm == geo.LocationPermission.deniedForever) {
+        return;
+      }
+
+      final pos = await geo.Geolocator.getCurrentPosition(
+        locationSettings: const geo.LocationSettings(
+          accuracy: geo.LocationAccuracy.medium,
+          timeLimit: Duration(seconds: 12),
+        ),
+      );
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      final baseUrl = prefs.getString(LocationSyncService.kApiBaseUrlPref);
+      final token = prefs.getString(LocationSyncService.kAccessTokenPref);
+      if (baseUrl == null || token == null) return;
+
+      final dio = Dio(BaseOptions(
+        baseUrl: baseUrl,
+        connectTimeout: const Duration(seconds: 8),
+        receiveTimeout: const Duration(seconds: 20),
+        headers: {'Authorization': 'Bearer $token'},
+      ));
+      await dio.post('/location/batch', data: {
+        'records': [
+          {
+            'lat': pos.latitude,
+            'lng': pos.longitude,
+            'timestamp': DateTime.now().toUtc().toIso8601String(),
+            'accuracy': pos.accuracy,
+            'speed': pos.speed,
+            'battery_level': null,
+            'is_mock_gps': pos.isMocked,
+          }
+        ],
+      });
+    } catch (_) {
+      // Best-effort: the next tick retries. Never surface to the UI.
+    }
   }
 
   /// Update the persistent foreground-service notification text — the line the

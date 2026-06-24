@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark-mode splash background; tile + pin stay brand-consistent. -->
+    <color name="splash_bg">#1A1A2E</color>
+    <color name="brand_amber">#F5A623</color>
+    <color name="brand_pin">#1A1A2E</color>
+</resources>

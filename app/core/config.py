@@ -72,6 +72,18 @@ class Settings(BaseSettings):
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
 
+    @property
+    def cors_origin_regex(self) -> str | None:
+        # Dev convenience: the Flutter web dev server binds a RANDOM localhost
+        # port on every run, so it can't be pinned in allowed_origins. Outside
+        # production, allow any http://localhost:<port> / 127.0.0.1:<port>
+        # origin via regex (this works alongside allow_credentials=True, which
+        # forbids a "*" wildcard). In production this returns None so origins
+        # stay strictly whitelisted in allowed_origins.
+        if self.is_production:
+            return None
+        return r"^http://(localhost|127\.0\.0\.1)(:\d+)?$"
+
     @field_validator("app_env")
     @classmethod
     def _validate_env(cls, v: str) -> str:

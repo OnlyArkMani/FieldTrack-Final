@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+ (API 31+) splash. The system SplashScreen API ignores the
+         legacy windowBackground drawable, so the brand mark must come through
+         windowSplashScreenAnimatedIcon. Without these, Android falls back to
+         the launcher icon (still the default Flutter logo) on a plain bg —
+         exactly the black/Flutter screen we're removing. -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowSplashScreenBackground">@color/splash_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/launch_logo</item>
+        <!-- Kept for the brief window before the SplashScreen API engages. -->
+        <item name="android:windowBackground">@drawable/launch_background</item>
+    </style>
+    <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">@color/splash_bg</item>
+    </style>
+</resources>

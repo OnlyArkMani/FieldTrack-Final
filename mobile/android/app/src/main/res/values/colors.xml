@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- FieldTrack brand palette (mirrors ThemeData in lib/core/theme).
+         splash_bg is overridden in values-night for dark mode. -->
+    <color name="splash_bg">#FFF8E7</color>   <!-- warm cream (light bg) -->
+    <color name="brand_amber">#F5A623</color> <!-- primary tile -->
+    <color name="brand_pin">#1A1A2E</color>   <!-- dark pin on amber -->
+</resources>
