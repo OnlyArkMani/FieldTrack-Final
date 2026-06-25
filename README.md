@@ -18,6 +18,8 @@
 
 [Documentation](#documentation) | [Quick Start](#quick-start) | [API Reference](#api-endpoints) | [Architecture](#architecture) | [Deployment](#deployment)
 
+**GitHub:** https://github.com/OnlyArkMani/FieldTrack-Final
+
 </div>
 
 ---
@@ -181,8 +183,8 @@ Designed for small-to-medium teams (15-100 employees) with zero architecture cha
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/your-org/FieldTrack.git
-cd FieldTrack
+git clone https://github.com/OnlyArkMani/FieldTrack-Final.git
+cd FieldTrack-Final
 
 # 2. Create environment file
 cp .env.example .env
@@ -256,6 +258,8 @@ REFRESH_TOKEN_EXPIRE_DAYS=7
 FCM_SERVICE_ACCOUNT_FILE=/run/secrets/fcm-service-account.json
 FCM_PROJECT_ID=your-firebase-project-id
 ```
+
+> **FCM Setup Note:** Download the Firebase service account JSON from Firebase Console → Project Settings → Service Accounts → Generate New Private Key. Place it at the path above. Also place `google-services.json` (Firebase Console → Project Settings → Android app) at `mobile/android/app/google-services.json` before building the Flutter APK — this file is excluded from git.
 
 **Reports**
 ```env
@@ -674,26 +678,26 @@ For issues, feature requests, or deployment help:
 
 ### Completed
 
-- Attendance state machine (START/BREAK/RESUME/END)
+- Attendance state machine (START/BREAK/RESUME/END) with work summary on END
 - Real-time GPS tracking with hybrid cadence (2-5 min moving, 10-15 min stationary)
-- Polygon geofencing via PostGIS with spatial indexing
-- Offline-first mobile sync with Redis deduplication
-- CSV, Excel, and PDF report export with async generation
-- Push notifications via Firebase Cloud Messaging (FCM)
+- Polygon geofencing via PostGIS — team-scoped zone assignment with entry/exit events
+- Offline-first mobile sync with Redis deduplication (6-hour dedup window)
+- CSV, Excel, and PDF report export — async pipeline, auto-prune after retention period
+- Distance zones report type — distance traveled + time-in-zone analytics
+- Push notifications via Firebase Cloud Messaging (FCM) — reminders, GPS alerts, admin broadcast
 - Dark and light theme toggle across mobile and web
-- Admin live dashboard with WebSocket real-time updates
-
-### In Progress
-
-- Biometric attendance integration (optional fingerprint/face recognition)
-- Advanced analytics and trend reporting
-- Mobile supervisor app refinements
-- Automated daily backups and disaster recovery workflows
+- Admin live dashboard with WebSocket real-time updates — per-member live status, expandable team cards
+- 31-day employee location trail on admin map — click any employee to replay movement
+- Supervisor sees own location in team live view
+- Android build: AGP 8.11.1, Gradle 8.14, Kotlin 2.2.20, core desugaring enabled
+- Splash screen with correct Android 12+ SplashScreen API integration
+- ProGuard/R8 production build configuration
+- Pre-deploy hardening: health checks, env-file validation, rollback scripts
+- GitHub Actions CI/CD pipeline with automated test + build jobs
 
 ### Planned
 
 - Multi-language support (internationalization)
-- Custom report builder with drag-and-drop fields
 - Time card corrections and approval workflows
 - Integration with payroll systems
 - WhatsApp and SMS notifications (supplementing FCM)
@@ -702,5 +706,6 @@ For issues, feature requests, or deployment help:
 ---
 
 **Project Status:** Production Ready  
-**Last Updated:** June 15, 2026  
-**Current Version:** 0.1.0
+**Last Updated:** June 25, 2026  
+**Current Version:** 0.2.0  
+**Repository:** https://github.com/OnlyArkMani/FieldTrack-Final
