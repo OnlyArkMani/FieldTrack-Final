@@ -246,6 +246,8 @@ class ReportService:
             target = await self.repo.get_user(filters.user_id)
             if target is None:
                 raise not_found("Employee not found")
+            if target.role == UserRole.ADMIN:
+                raise bad_request("Cannot generate a report for an admin account")
             scope = f"Employee: {target.name}"
         elif filters.team_id is not None:
             team = await self.repo.get_team(filters.team_id)
