@@ -50,6 +50,9 @@ async def seed_admin() -> None:
     email = os.environ.get("ADMIN_EMAIL", "admin@fieldtrack.local").strip().lower()
     name = os.environ.get("ADMIN_NAME", "FieldTrack Admin").strip()
     phone = os.environ.get("ADMIN_PHONE", "").strip() or None
+    # Optional: pass ADMIN_PASSWORD to use a chosen password instead of a random one.
+    # If not set, a cryptographically random 20-char password is generated.
+    custom_password = os.environ.get("ADMIN_PASSWORD", "").strip() or None
 
     async with async_session_factory() as session:
         existing = (
@@ -59,7 +62,7 @@ async def seed_admin() -> None:
             print(f"[seed] admin already exists: {email} — leaving untouched.")
             return
 
-        password = generate_password()
+        password = custom_password if custom_password else generate_password()
         admin = User(
             name=name,
             email=email,
